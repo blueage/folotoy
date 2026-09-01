@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="FoloPass 2FA">
+  <rect width="512" height="512" fill="#020617" />
+  <path d="M256 144l96 36v84c0 63-40 106-96 120-56-14-96-57-96-120v-84l96-36z" fill="none" stroke="#38bdf8" stroke-width="24" stroke-linejoin="round" />
+  <path d="M216 268l30 32 58-66" fill="none" stroke="#38bdf8" stroke-width="24" stroke-linecap="round" stroke-linejoin="round" />
+</svg>

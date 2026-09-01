@@ -1,0 +1,12 @@
+{
+  // 应用侧配置继承 node 侧（构建脚本）配置，只覆盖浏览器/JSX 相关选项，
+  // 这样 `tsc --noEmit` 一次即可覆盖 src 与 vite/vitest 配置文件。
+  "extends": "./tsconfig.node.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "types": ["node", "vitest/globals", "@testing-library/jest-dom", "web-bluetooth"],
+    "allowImportingTsExtensions": true
+  },
+  "include": ["src", "vite.config.ts", "vitest.config.ts"]
+}

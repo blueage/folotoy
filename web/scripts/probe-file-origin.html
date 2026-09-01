@@ -1,0 +1,99 @@
+<!doctype html>
+<!--
+  file:// 存储隔离探针。
+
+  问题：把应用做成双击打开的本地 HTML 之后，它的 IndexedDB 到底属于哪个源？
+    - 若每个本地文件是独立的源，那么别的本地网页读不到本应用的数据；
+    - 若所有 file:// 页面共用一个源，那么你随手打开的任何一个本地 HTML
+      都能读到本应用的保险库，并且能直接使用那把「不可导出」的包裹密钥解密
+      （不可导出只挡导出，不挡使用）。
+
+  本页面只列出数据库名 / 仓库名 / 记录条数，不读取也不显示任何字段内容。
+  用法：把它放到和 folopass-2fa.html 不同的目录，双击打开。
+-->
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>file:// 存储隔离探针</title>
+  </head>
+  <body>
+    <h1>file:// 存储隔离探针</h1>
+    <p>只统计条数，不显示任何字段内容。</p>
+    <pre id="out">running…</pre>
+    <script type="module">
+      const out = document.getElementById('out');
+      const lines = [];
+      const say = (s) => {
+        lines.push(s);
+        out.textContent = lines.join('\n');
+      };
+
+      say('本页 URL: ' + location.href);
+      say('origin: ' + location.origin);
+      say('');
+
+      if (typeof indexedDB.databases !== 'function') {
+        say('浏览器不支持 indexedDB.databases()，改为直接探测已知库名。');
+      }
+
+      let names = [];
+      try {
+        names = (await indexedDB.databases()).map((d) => d.name).filter(Boolean);
+        say('本源可见的数据库: ' + (names.length ? names.join(', ') : '(无)'));
+      } catch (e) {
+        say('列举数据库失败: ' + e);
+      }
+
+      // 直接探测应用用的库名。已存在则能读出仓库结构；不存在则会被我们建出来再删掉。
+      const TARGET = 'folopass2fa';
+      let existed = names.includes(TARGET);
+      say('');
+      say(`目标库 "${TARGET}" 是否已可见: ${existed ? '是 —— 本页能看到应用的数据' : '否'}`);
+
+      if (existed) {
+        try {
+          const db = await new Promise((res, rej) => {
+            // 不带版本号打开：不会触发升级，读到的就是现有结构。
+            const r = indexedDB.open(TARGET);
+            r.onsuccess = () => res(r.result);
+            r.onerror = () => rej(r.error);
+            r.onblocked = () => rej(new Error('blocked'));
+          });
+          const stores = Array.from(db.objectStoreNames);
+          say('对象仓库: ' + stores.join(', '));
+          for (const s of stores) {
+            const n = await new Promise((res, rej) => {
+              const r = db.transaction(s).objectStore(s).count();
+              r.onsuccess = () => res(r.result);
+              r.onerror = () => rej(r.error);
+            });
+            say(`  ${s}: ${n} 条记录`);
+          }
+          // 关键判断：包裹密钥是否也能被本页拿到。
+          if (stores.includes('keys')) {
+            const key = await new Promise((res, rej) => {
+              const r = db.transaction('keys').objectStore('keys').get('vault');
+              r.onsuccess = () => res(r.result);
+              r.onerror = () => rej(r.error);
+            });
+            say('');
+            say(
+              'keys/vault 包裹密钥: ' +
+                (key
+                  ? `本页可取得（type=${key.type}, extractable=${key.extractable}, algorithm=${key.algorithm?.name}）—— 可直接用于解密`
+                  : '取不到'),
+            );
+          }
+          db.close();
+          say('');
+          say('结论：所有 file:// 页面共用同一个存储源。任何本地 HTML 都能读到保险库。');
+        } catch (e) {
+          say('读取失败: ' + e);
+        }
+      } else {
+        say('');
+        say('结论：本页看不到应用的数据 —— file:// 下各文件的存储是隔离的。');
+      }
+    </script>
+  </body>
+</html>

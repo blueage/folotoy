@@ -1,0 +1,14 @@
+node_modules/
+dist/
+dist-file/
+dev-dist/
+coverage/
+
+# /run-tasks 的运行日志与报告：每次执行都会新建一个 run-* 目录，属于本地产物
+docs/plans/**/tasks/.run-tasks/
+
+.DS_Store
+*.local
+.env
+.env.*
+!.env.example
