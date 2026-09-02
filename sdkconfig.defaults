@@ -41,9 +41,20 @@ CONFIG_LV_MEM_SIZE_KILOBYTES=32
 # --- 系统 ---
 CONFIG_FREERTOS_HZ=1000
 
+# CPU 主频。这点 UI 负载 80 MHz 绰绰有余，而 160 MHz 大约多耗 8~10 mA，
+# 对 520 mAh 的电池不是小数。ESP32-C3 的 APB 固定 80 MHz，不受此项影响，
+# 因此 SPI 屏的 40 MHz 时钟照旧。
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=80
+
 # --- SNTP ---
 # 开机对时配了三个服务器（见 main/otp_wifi.c），默认上限是 1。
 CONFIG_LWIP_SNTP_MAX_SERVERS=3
+
+# 关掉首包随机延迟。它默认在发第一个请求前随机等 0~5 秒，用意是避免成千上万台
+# 设备同时开机把公共 NTP 池打爆；但对单台设备而言，它白白吃掉了我们 10 秒对时
+# 预算的一半——真机上已经因此超时过两次。
+CONFIG_LWIP_SNTP_STARTUP_DELAY=n
 
 # --- 编译优化 ---
 # 默认的 -Og 会让镜像逼近 1 MB。注意上限不是 factory 的 3 MB：ESP-IDF 按

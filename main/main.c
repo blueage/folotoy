@@ -10,7 +10,9 @@
 #include "bsp_display.h"
 #include "bsp_i2c.h"
 #include "bsp_pins.h"
+#include "otp_batlog.h"
 #include "otp_clock.h"
+#include "otp_power.h"
 #include "otp_ui.h"
 #include "otp_vault.h"
 #include "otp_wifi.h"
@@ -65,7 +67,8 @@ void app_main(void)
                  BSP_LCD_MOSI, BSP_LCD_SCLK, BSP_LCD_CS, BSP_LCD_DC, BSP_LCD_BL);
         return;
     }
-    bsp_display_backlight(100);
+    // 背光与熄屏统一交给 otp_power 管，这里不再自己拉满。
+    otp_power_init();
 
     if (bsp_lvgl_lock(1000)) {
         otp_ui_init();
@@ -74,6 +77,9 @@ void app_main(void)
 
     // 开机就去对时：任务在后台跑，UI 已经画出来了，不会卡住开机。
     otp_wifi_start_time_sync();
+
+    // 放电曲线记录：打印上一轮、开始这一轮。
+    otp_batlog_start();
 
     if (bsp_button_init(on_key, NULL) != ESP_OK) {
         ESP_LOGE(TAG, "按键初始化失败：只能看到第一页，无法翻页或同步");

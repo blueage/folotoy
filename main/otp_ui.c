@@ -2,6 +2,7 @@
 
 #include "otp_clock.h"
 #include "otp_core.h"
+#include "otp_power.h"
 #include "otp_sync.h"
 #include "otp_totp.h"
 #include "otp_vault.h"
@@ -20,7 +21,12 @@
 static const char *TAG = "otp_ui";
 
 #define OTP_UI_ROWS 4
-#define OTP_UI_TICK_MS 200
+
+// 刷新周期按屏幕状态走：亮着时要跟手，暗下来之后没必要每秒五次地算 HMAC。
+// 变暗时仍然照常刷新——屏幕还看得见，验证码不能是停住的。
+#define OTP_UI_TICK_ACTIVE_MS 200
+#define OTP_UI_TICK_DIM_MS 1000
+#define OTP_UI_TICK_MS OTP_UI_TICK_ACTIVE_MS
 
 // 行的几何。ui_pixel_panel_create 会加 4px 边框，这里把内边距压到 4px，
 // 于是内容区 = 204 - 2*(4+4) = 188 宽、46 - 16 = 30 高。
@@ -423,6 +429,19 @@ static void refresh_sync(void)
 static void tick(lv_timer_t *timer)
 {
     (void)timer;
+
+    // 同步页要一直亮着：屏幕上那个 FoloPass-XXXX 正是用户要在浏览器里认的。
+    if (s_page == OTP_PAGE_SYNC) {
+        otp_power_note_activity();
+    }
+    otp_power_tick();
+
+    if (s_timer != NULL) {
+        lv_timer_set_period(s_timer, otp_power_state() == OTP_POWER_ACTIVE
+                                         ? OTP_UI_TICK_ACTIVE_MS
+                                         : OTP_UI_TICK_DIM_MS);
+    }
+
     switch (s_page) {
     case OTP_PAGE_LIST:
         refresh_list();
@@ -488,6 +507,10 @@ void otp_ui_init(void)
 
 void otp_ui_key(bsp_btn_t btn, bsp_btn_ev_t ev)
 {
+    // 恢复全亮并重新计时。不吞这次按键：变暗时屏幕依然可读，
+    // 用户是看着屏幕按下去的，把第一下吃掉只会显得迟钝。
+    otp_power_handle_key();
+
     if (btn == BSP_BTN_OK && ev == BSP_BTN_LONG) {
         // 长按确定在任何页面都切换"同步 / 不同步"：BLE 只在同步页存在。
         if (s_page == OTP_PAGE_SYNC) {

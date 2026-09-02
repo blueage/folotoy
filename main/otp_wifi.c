@@ -23,7 +23,8 @@ static const char *TAG = "otp_wifi";
 
 // 连接与对时各自的上限。加起来是"开机后最多让 Wi-Fi 活多久"。
 #define OTP_WIFI_CONNECT_TIMEOUT_MS 12000
-#define OTP_WIFI_SNTP_TIMEOUT_MS 10000
+// 15 秒：DNS 解析 + 一个来回，在慢网络上 10 秒偏紧（实测超时过）。
+#define OTP_WIFI_SNTP_TIMEOUT_MS 15000
 
 #define OTP_WIFI_BIT_GOT_IP BIT0
 #define OTP_WIFI_BIT_FAILED BIT1

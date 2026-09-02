@@ -12,5 +12,11 @@ esp_err_t bsp_battery_init(void);
 // 剩余电量百分比 0..100;读失败返回 -1。
 int bsp_battery_soc(void);
 
+// 高精度剩余电量,单位 1/256 %(满电 = 25600)。读失败返回 -1。
+//
+// 存在的理由是测续航:只看整数百分比的话,10 小时的电池要 6 分钟才跳 1%,
+// 想估出斜率得跑几小时;带上低字节的分辨率是 0.004%,十几分钟就够算了。
+int bsp_battery_soc_q8(void);
+
 // 电池电压 mV;读失败返回 -1。
 int bsp_battery_mv(void);

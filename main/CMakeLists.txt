@@ -8,6 +8,8 @@ idf_component_register(
          "otp_totp.c"
          "otp_sync.c"
          "otp_wifi.c"
+         "otp_power.c"
+         "otp_batlog.c"
          "otp_ui.c"
          "ui_pixel.c"
     INCLUDE_DIRS "."

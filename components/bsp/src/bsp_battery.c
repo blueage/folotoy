@@ -67,6 +67,13 @@ int bsp_battery_soc(void) {
     return soc;
 }
 
+int bsp_battery_soc_q8(void) {
+    uint8_t b[2] = { 0 };
+    if (cw_read(CW_REG_SOC_H, b, 2) != 0) return -1;
+    if (b[0] > 100) return -1;                  // 芯片未就绪时可能读到 0xFF
+    return (int)b[0] * 256 + (int)b[1];         // 高字节 = %, 低字节 = 1/256 %
+}
+
 int bsp_battery_mv(void) {
     uint8_t b[2] = { 0 };
     if (cw_read(CW_REG_VCELL_H, b, 2) != 0) return -1;

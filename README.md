@@ -36,6 +36,9 @@
 | 详情 | 切换上一条 / 下一条 | 回到列表 | 进入 / 退出 SYNC |
 | SYNC | — | — | 退出 SYNC 并回到列表 |
 
+屏幕在 30 秒无操作后变暗（不熄屏，仍然看得清），按任意键恢复全亮且这一下照常生效。
+同步页始终全亮。省电细节见 [`docs/power.zh_CN.md`](docs/power.zh_CN.md)。
+
 列表页顶栏：**左上角是本地时间 `HH:MM`**（时区由网页在同步时下发），**右上角是电量百分比**
 （低于 20% 转红；电量计读不到时显示 `--`）。倒计时条在最后 5 秒变红。
 
@@ -94,6 +97,7 @@ idf.py flash monitor
 - [`docs/protocol.zh_CN.md`](docs/protocol.zh_CN.md) — BLE 同步协议的完整线格式（两端的唯一契约）
 - [`docs/security.zh_CN.md`](docs/security.zh_CN.md) — 威胁模型、已接受的取舍与可选的加固方向
 - [`docs/flashing.zh_CN.md`](docs/flashing.zh_CN.md) — 编译、烧录与真机验收清单
+- [`docs/power.zh_CN.md`](docs/power.zh_CN.md) — 功耗去向、已做的省电措施、为什么不做 deep sleep、怎么实测续航
 - [`web/README.md`](web/README.md) — 网页部分的构建形态、图标管线与 CSP 说明
 
 ## 许可
