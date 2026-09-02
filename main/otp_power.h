@@ -20,7 +20,11 @@ typedef enum {
 #define OTP_POWER_DIM_AFTER_MS 30000
 
 #define OTP_POWER_ACTIVE_PERCENT 100
-// 觉得太暗看不清就调大这个数（代价是省得少一些）。
+// 觉得太暗看不清就调大这个数。
+//
+// 实测（见 docs/power.zh_CN.md）：从 10% 改成完全熄屏只省 6.2 mA、约 14%，
+// 续航 11.6 → 13.4 小时。也就是说亮度这一档的收益有限，为它牺牲"抬眼即看"
+// 不划算——大头在别处。
 #define OTP_POWER_DIM_PERCENT 10
 
 // 必须在 bsp_display_init() 成功之后调用。
