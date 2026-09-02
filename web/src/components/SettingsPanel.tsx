@@ -71,6 +71,7 @@ export default function SettingsPanel({
         </label>
         <p className="text-xs text-slate-500 dark:text-slate-400">
           设备时钟偏慢时填正数、偏快时填负数。本应用不会向任何时间服务器发起请求。
+          这个偏移也会叠加到<strong>推送给工卡的时间</strong>上，两处显示的验证码因此始终一致。
         </p>
         <div>
           <button

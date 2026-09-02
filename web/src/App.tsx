@@ -167,6 +167,8 @@ export default function App({ vault = vaultStore, settings = settingsStore }: Ap
       {showBadge && (
         <BadgePanel
           entries={entries}
+          // 设置里的时钟偏移同样作用于推给工卡的时间：两处显示的码必须一致。
+          clockOffsetSec={clockOffsetSec}
           onUpdateEntry={handleUpdateEntry}
           onClose={() => {
             setShowBadge(false);

@@ -128,6 +128,20 @@ void otp_clock_set(uint64_t unix_seconds)
     ESP_LOGI(TAG, "时间已同步: %llu", (unsigned long long)unix_seconds);
 }
 
+void otp_clock_mark_synced(void)
+{
+    struct timeval tv;
+    if (gettimeofday(&tv, NULL) != 0 || tv.tv_sec <= 0) {
+        return;
+    }
+    s_valid = true;
+    s_rtc_magic = OTP_CLOCK_RTC_MAGIC;
+    s_rtc_valid = 1;
+    s_last_sync = (uint64_t)tv.tv_sec;
+    store_last_sync(s_last_sync);
+    ESP_LOGI(TAG, "时间已由 SNTP 设定: %llu", (unsigned long long)s_last_sync);
+}
+
 bool otp_clock_is_valid(void)
 {
     return s_valid;

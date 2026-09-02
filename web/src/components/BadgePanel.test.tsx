@@ -156,6 +156,27 @@ describe('BadgePanel', () => {
     expect(badge.tzOffsetMin).toBe(-new Date().getTimezoneOffset());
   });
 
+  it('设置里的时钟偏移会叠加到推给工卡的时间上', async () => {
+    const badge = new FakeBadge();
+    render(
+      <BadgePanel
+        entries={[makeEntry()]}
+        onUpdateEntry={vi.fn()}
+        onClose={() => undefined}
+        connect={() => Promise.resolve(fakeConnection(badge))}
+        nowSec={() => NOW}
+        clockOffsetSec={6}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: '连接工卡' }));
+    await screen.findByText('FoloPass-TEST');
+
+    fireEvent.click(screen.getByRole('button', { name: '推送 1 条到工卡' }));
+    await screen.findByText(/已推送 1 条/);
+    // 工卡上的时间要比浏览器快 6 秒——这正是"网页显示的码和工卡一致"的前提。
+    expect(badge.timeSec).toBe(NOW + 6);
+  });
+
   it('清空工卡需要二次确认', async () => {
     const { badge } = renderPanel([makeEntry()]);
     await connect();

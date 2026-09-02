@@ -220,7 +220,10 @@ static void sync_task(void *arg)
     }
 
     s_state = OTP_WIFI_SYNCING;
-    esp_sntp_config_t sntp_config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    // 配三个服务器：pool.ntp.org 在某些网络里会被中间设备劫持并答复一个偏掉的
+    // 时间，多给两个来源，至少让"全都被劫持"成为一件更难发生的事。
+    esp_sntp_config_t sntp_config = ESP_NETIF_SNTP_DEFAULT_CONFIG_MULTIPLE(
+        3, ESP_SNTP_SERVER_LIST("ntp.aliyun.com", "time.apple.com", "pool.ntp.org"));
     if (esp_netif_sntp_init(&sntp_config) != ESP_OK) {
         s_state = OTP_WIFI_FAILED;
         goto cleanup;
@@ -232,11 +235,11 @@ static void sync_task(void *arg)
         goto cleanup;
     }
 
-    // SNTP 已经调过 settimeofday，这里把结果交给 otp_clock 记账：
-    // 它才是"时间可不可信"的唯一判据。
+    // SNTP 已经把系统时钟设准（带亚秒精度），这里只需标记"可信"。
+    // 千万别 time(NULL) 之后再 settimeofday 回去——那等于把表往回拨 0~1 秒。
     time_t now = time(NULL);
     if (now > 0) {
-        otp_clock_set((uint64_t)now);
+        otp_clock_mark_synced();
         s_state = OTP_WIFI_DONE;
         ESP_LOGI(TAG, "Wi-Fi 对时成功: %lld", (long long)now);
     } else {

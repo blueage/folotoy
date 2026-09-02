@@ -71,6 +71,40 @@ describe('pushEntries', () => {
     expect(stored).toMatchObject({ digits: 8, period: 60, algorithm: 2 });
   });
 
+  it('写入完成后补一帧新鲜时间，抵消整批传输的耗时', async () => {
+    const badge = new FakeBadge();
+    // 模拟"传输花了 10 秒"：第一次取时间用于 BEGIN，第二次是写完之后。
+    let call = 0;
+    const nowSec = () => NOW + call++ * 10;
+
+    await pushEntries(badge, [entry('A')], { nowSec });
+
+    // 工卡上最终的时间必须是**写完之后**那次，而不是开始传输时的那次；
+    // 否则条目越多、工卡的表越慢。
+    expect(badge.timeSec).toBe(NOW + 10);
+  });
+
+  it('补时间失败不影响推送本身的成败', async () => {
+    const badge = new FakeBadge();
+    // 条目写进去之后就不再回帧，补时间那一步会超时。
+    const original = badge.send.bind(badge);
+    let committed = false;
+    badge.send = (chunk: Uint8Array) => {
+      if (committed) {
+        return Promise.resolve();
+      }
+      const result = original(chunk);
+      if (badge.received.length > 0) {
+        committed = true;
+      }
+      return result;
+    };
+
+    const result = await pushEntries(badge, [entry('A')], { nowSec: () => NOW, timeoutMs: 30 });
+    expect(result.count).toBe(1);
+    expect(badge.received).toHaveLength(1);
+  });
+
   it('逐条汇报进度', async () => {
     const badge = new FakeBadge();
     const seen: string[] = [];

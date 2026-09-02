@@ -41,6 +41,10 @@ CONFIG_LV_MEM_SIZE_KILOBYTES=32
 # --- 系统 ---
 CONFIG_FREERTOS_HZ=1000
 
+# --- SNTP ---
+# 开机对时配了三个服务器（见 main/otp_wifi.c），默认上限是 1。
+CONFIG_LWIP_SNTP_MAX_SERVERS=3
+
 # --- 编译优化 ---
 # 默认的 -Og 会让镜像逼近 1 MB。注意上限不是 factory 的 3 MB：ESP-IDF 按
 # **最小的 app 分区**（1 MB 的 recovery）做体积检查，而 recovery 的地址与大小

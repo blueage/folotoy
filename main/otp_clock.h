@@ -18,6 +18,12 @@ void otp_clock_init(void);
 // 网页同步时间时调用。写 settimeofday，并把时刻记进 NVS 供下次开机显示。
 void otp_clock_set(uint64_t unix_seconds);
 
+// 系统时钟**已经**被别人（SNTP）设准了，只需把它标记为可信。
+//
+// 与 otp_clock_set() 的区别是这里不碰 settimeofday：SNTP 设的时间带亚秒精度，
+// 若先 time(NULL) 截断再写回去，等于把表往回拨了 0~1 秒。
+void otp_clock_mark_synced(void);
+
 // 当前时间是否可用于计算验证码。
 bool otp_clock_is_valid(void);
 

@@ -39,6 +39,13 @@ export interface BadgePanelProps {
   connect?: () => Promise<ConnectedBadge>;
   /** 取当前 Unix 秒。测试注入固定值。 */
   nowSec?: () => number;
+  /**
+   * 设置里的手动时钟偏移（秒），推送给工卡的时间会叠加它。
+   *
+   * 存在的理由：浏览器时钟与工卡 SNTP 拿到的时间可能都不准（被网络里的中间设备
+   * 干扰过的 NTP 尤其常见），而 TOTP 差几秒就会算错。这是最后的兜底旋钮。
+   */
+  clockOffsetSec?: number;
 }
 
 type Phase = 'idle' | 'connecting' | 'ready' | 'working';
@@ -59,7 +66,8 @@ export default function BadgePanel({
   onUpdateEntry,
   onClose,
   connect = connectBadge,
-  nowSec = () => Math.floor(Date.now() / 1000),
+  nowSec,
+  clockOffsetSec = 0,
 }: BadgePanelProps) {
   const [phase, setPhase] = useState<Phase>('idle');
   const [status, setStatus] = useState<BadgeStatus | null>(null);
@@ -74,6 +82,13 @@ export default function BadgePanel({
 
   // 连接握在 ref 里：它不参与渲染，放进 state 只会让每次状态更新都拖着它跑。
   const badgeRef = useRef<ConnectedBadge | null>(null);
+
+  // 偏移叠加在这里，而不是散落到每个调用点：推送、只对时都要用同一个时刻。
+  const effectiveNowSec = useCallback(
+    () => (nowSec !== undefined ? nowSec() : Math.round(Date.now() / 1000)) + clockOffsetSec,
+    [clockOffsetSec, nowSec],
+  );
+
 
   const dropConnection = useCallback(() => {
     badgeRef.current?.disconnect();
@@ -157,7 +172,7 @@ export default function BadgePanel({
     const payload = chosen.flatMap((row) => (row.conversion.ok ? [row.conversion.entry] : []));
     void runOnLink('推送', async (badge) => {
       const result = await pushEntries(badge.link, payload, {
-        nowSec,
+        nowSec: effectiveNowSec,
         onProgress: (sent, total) => {
           setProgress({ sent, total });
         },
@@ -165,14 +180,16 @@ export default function BadgePanel({
       setStatus(result.status);
       return `已推送 ${String(result.count)} 条到工卡，并顺带对好了时间。`;
     });
-  }, [blocked.length, chosen, nowSec, runOnLink]);
+  }, [blocked.length, chosen, effectiveNowSec, runOnLink]);
 
   const handleTime = useCallback(() => {
     void runOnLink('对时', async (badge) => {
-      await pushTime(badge.link, { nowSec });
-      return '已把当前时间同步给工卡。';
+      await pushTime(badge.link, { nowSec: effectiveNowSec });
+      return clockOffsetSec === 0
+        ? '已把当前时间同步给工卡。'
+        : `已把当前时间（含 ${String(clockOffsetSec)} 秒偏移）同步给工卡。`;
     });
-  }, [nowSec, runOnLink]);
+  }, [clockOffsetSec, effectiveNowSec, runOnLink]);
 
   const handleSaveWifi = useCallback(() => {
     const ssid = wifiSsid.trim();

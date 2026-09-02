@@ -194,7 +194,8 @@ export async function pushEntries(
     );
   }
 
-  const nowSec = options.nowSec ?? (() => Math.floor(Date.now() / 1000));
+  // 四舍五入而不是 floor：floor 系统性地把时间往回抹 0~1 秒，总是让工卡偏慢。
+  const nowSec = options.nowSec ?? (() => Math.round(Date.now() / 1000));
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const frames = buildPushFrames(entries, nowSec(), options.tzOffsetMin ?? browserTzOffsetMin());
   const statusWatch = watchStatus(link);
@@ -233,6 +234,20 @@ export async function pushEntries(
     }
 
     const status = await statusWatch.take(timeoutMs, '工卡已写入，但没有回报最新状态。');
+
+    // BEGIN 里那个时间戳是**开始传输前**取的，而工卡要到 COMMIT 才把它写进时钟。
+    // 中间隔着整批条目的传输时间：4 条约 1 秒，30 条要好几秒——工卡因此系统性地
+    // 慢那么多。这里在写入完成后补一帧新鲜的 TIME，把这段落差抹掉。
+    try {
+      await pushTime(link, {
+        ...(options.nowSec !== undefined ? { nowSec: options.nowSec } : {}),
+        ...(options.tzOffsetMin !== undefined ? { tzOffsetMin: options.tzOffsetMin } : {}),
+        timeoutMs,
+      });
+    } catch {
+      // 条目已经写进去了，这一步只是让时间更准；失败不该把整次推送判为失败。
+      // 用户仍可以点「只对时」重来。
+    }
     return { count: commitAck.received, status };
   } finally {
     statusWatch.stop();
@@ -244,7 +259,7 @@ export async function pushTime(
   link: BadgeLink,
   options: PushOptions = {},
 ): Promise<void> {
-  const nowSec = options.nowSec ?? (() => Math.floor(Date.now() / 1000));
+  const nowSec = options.nowSec ?? (() => Math.round(Date.now() / 1000));
   const ack = await request(
     link,
     encodeTime(nowSec(), options.tzOffsetMin ?? browserTzOffsetMin()),
