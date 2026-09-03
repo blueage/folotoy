@@ -14,6 +14,12 @@ static const char *TAG = "otp_batlog";
 
 #define OTP_BATLOG_NAMESPACE "folo2fa"
 #define OTP_BATLOG_KEY "batlog"
+// 上一轮的副本。分开存是为了"读一次就丢"这个坑：开机会打印并清空当前记录，
+// 若那一刻没人在抓串口，整夜的数据就没了。副本只被**足够长**的会话覆盖，
+// 因此"插上线开机读一次"这种短会话不会冲掉它，读漏了可以再复位读一遍。
+#define OTP_BATLOG_KEY_PREV "batlog_prev"
+// 少于这么多个点的会话不配覆盖副本（10 分钟）。
+#define OTP_BATLOG_MIN_KEEP 10
 #define OTP_BATLOG_VERSION 2
 
 // 单点 6 字节：开机后的分钟数、SOC（1/256 %）、电压。
@@ -32,6 +38,25 @@ typedef struct __attribute__((packed)) {
 // 730 字节，放静态区：别塞进任务栈。
 static otp_batlog_blob_t s_log;
 
+// 把刚结束的那一轮（若足够长）提升为"上一轮副本"。
+static void rotate(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open(OTP_BATLOG_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
+        return;
+    }
+    size_t len = sizeof(s_log);
+    esp_err_t err = nvs_get_blob(handle, OTP_BATLOG_KEY, &s_log, &len);
+    if (err == ESP_OK && len == sizeof(s_log) && s_log.version == OTP_BATLOG_VERSION &&
+        s_log.count >= OTP_BATLOG_MIN_KEEP) {
+        if (nvs_set_blob(handle, OTP_BATLOG_KEY_PREV, &s_log, sizeof(s_log)) == ESP_OK) {
+            nvs_commit(handle);
+            ESP_LOGI(TAG, "已把刚结束的 %u 点记录存为副本", (unsigned)s_log.count);
+        }
+    }
+    nvs_close(handle);
+}
+
 static void dump_previous(void)
 {
     nvs_handle_t handle;
@@ -39,7 +64,7 @@ static void dump_previous(void)
         return;
     }
     size_t len = sizeof(s_log);
-    esp_err_t err = nvs_get_blob(handle, OTP_BATLOG_KEY, &s_log, &len);
+    esp_err_t err = nvs_get_blob(handle, OTP_BATLOG_KEY_PREV, &s_log, &len);
     nvs_close(handle);
 
     if (err != ESP_OK || len != sizeof(s_log) || s_log.version != OTP_BATLOG_VERSION) {
@@ -129,6 +154,7 @@ static void batlog_task(void *arg)
 
 void otp_batlog_start(void)
 {
+    rotate();
     dump_previous();
 
     memset(&s_log, 0, sizeof(s_log));

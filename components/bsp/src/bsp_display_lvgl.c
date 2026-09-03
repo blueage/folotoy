@@ -16,7 +16,10 @@ lv_display_t *bsp_lvgl_init(void) {
         return NULL;
     }
 
-    const lvgl_port_cfg_t pc = ESP_LVGL_PORT_INIT_CONFIG();
+    lvgl_port_cfg_t pc = ESP_LVGL_PORT_INIT_CONFIG();
+    // 默认 5ms 的 tick 意味着每秒唤醒 CPU 200 次，tickless idle 根本没有空隙可用。
+    // 本项目的界面没有动画，20ms 的时间精度绰绰有余。
+    pc.timer_period_ms = 20;
     if (lvgl_port_init(&pc) != ESP_OK) {
         ESP_LOGE(TAG, "lvgl_port_init 失败");
         return NULL;

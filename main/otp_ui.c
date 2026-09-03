@@ -224,11 +224,13 @@ static void build_list(void)
     lv_obj_align(s_empty, LV_ALIGN_TOP_MID, 0, 120);
     lv_obj_add_flag(s_empty, LV_OBJ_FLAG_HIDDEN);
 
-    s_footer = ui_pixel_label(s_screen, "", &lv_font_montserrat_14, UI_PAPER);
+    // 提示文字压在底部那条草地里：列表本身就占满了上方，这条提示是次要信息，
+    // 放进草地既不占内容区，也让整屏不留一条尴尬的空档。
+    // 草地是 y=286..320，装饰草丛在 312 以下，所以文字放 291 正好落在净空里。
+    s_footer = ui_pixel_label(s_screen, "", &lv_font_montserrat_14, UI_INK);
     lv_obj_set_width(s_footer, 220);
     lv_obj_set_style_text_align(s_footer, LV_TEXT_ALIGN_CENTER, 0);
-    // 四行到 260 结束，草地从 286 开始，页脚正好放中间那条空档。
-    lv_obj_align(s_footer, LV_ALIGN_TOP_MID, 0, 264);
+    lv_obj_align(s_footer, LV_ALIGN_TOP_MID, 0, 291);
 }
 
 static void refresh_list(void)
@@ -288,7 +290,9 @@ static void refresh_list(void)
             lv_label_set_text(s_footer, "NO TIME - hold OK to sync");
         }
     } else if (s_vault.count > 0U) {
-        lv_label_set_text_fmt(s_footer, "%u/%u   OK: zoom   hold OK: sync",
+        // 序号补零到两位、提示用短标签：原来的 "10/10   OK: zoom   hold OK: sync"
+        // 有 32 个字符，在 220px 宽的标签里会换行，第二行正好压进草丛。
+        lv_label_set_text_fmt(s_footer, "%02u/%02u BtnC:Enter Hold:Sync",
                               (unsigned)(s_selected + 1U), (unsigned)s_vault.count);
     } else {
         lv_label_set_text(s_footer, "hold OK: sync");
@@ -326,10 +330,10 @@ static void build_detail(void)
     lv_obj_align(s_detail_hint, LV_ALIGN_BOTTOM_MID, 0, 0);
 
     s_footer = ui_pixel_label(s_screen, "UP/DOWN: switch   OK: back", &lv_font_montserrat_14,
-                              UI_PAPER);
+                              UI_INK);
     lv_obj_set_width(s_footer, 220);
     lv_obj_set_style_text_align(s_footer, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(s_footer, LV_ALIGN_TOP_MID, 0, 260);
+    lv_obj_align(s_footer, LV_ALIGN_TOP_MID, 0, 291);
 }
 
 static void refresh_detail(void)
@@ -369,10 +373,10 @@ static void build_sync(void)
     lv_obj_set_style_text_align(s_sync_status, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_center(s_sync_status);
 
-    s_footer = ui_pixel_label(s_screen, "hold OK: leave sync", &lv_font_montserrat_14, UI_PAPER);
+    s_footer = ui_pixel_label(s_screen, "hold OK: leave sync", &lv_font_montserrat_14, UI_INK);
     lv_obj_set_width(s_footer, 220);
     lv_obj_set_style_text_align(s_footer, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(s_footer, LV_ALIGN_TOP_MID, 0, 260);
+    lv_obj_align(s_footer, LV_ALIGN_TOP_MID, 0, 291);
 }
 
 static void refresh_sync(void)

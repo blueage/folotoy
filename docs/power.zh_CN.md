@@ -53,12 +53,24 @@ tickless idle，并放宽 LVGL port 的 5 ms tick）。注意一个坑：**USB �
 
 ### 实测值
 
-两轮各 143 分钟的连续放电（放着不动、不按键），唯一变量是变暗后的背光亮度：
+三轮实测，每轮取 141~143 分钟的稳定窗口（放着不动、不按键）：
 
-| 变暗后背光 | 电量变化 | 电压 | 平均电流 | 满电续航（线性外推） |
-| --- | --- | --- | --- | --- |
-| **10%（当前设定）** | 87.56% → 66.93% | 4021 → 3876 mV | **45.0 mA** | **11.6 小时** |
-| **0%（熄屏，仅用于对照）** | 80.32% → 62.52% | 3967 → 3856 mV | **38.8 mA** | **13.4 小时** |
+| 配置 | 平均电流 | 满电续航（线性外推） |
+| --- | --- | --- |
+| PM 关闭，背光 10% | 45.0 mA | 11.6 小时 |
+| PM 关闭，背光全熄（仅用于对照） | 38.8 mA | 13.4 小时 |
+| **PM 开启（DFS + 自动 light sleep），背光 10%** | **13.5 mA** | **约 38 小时** |
+
+**大头从来不是背光，是 CPU 没机会进 idle。** 注意第三行比第二行低得多：屏幕亮着
+（10%）却比"屏幕全熄但不睡"还省 25 mA。这也是为什么先做那个熄屏对照是值得的——
+它把力气从只值 6 mA 的方向上引开了。
+
+开启 PM 那轮的整轮是 725 分钟（12.1 小时）后仍剩约 50% 电。
+
+**这个 13.5 mA 要打折扣看**：电流降到这个量级后，每分钟只掉 0.04% 电，已接近电量计
+的噪声底——四段分别是 13.5 / 11.6 / 12.0 / 16.8 mA，逐分钟速率的标准差占均值 34%
+（前两轮只有 9%）。诚实的说法是 **13.5 ± 2 mA、续航 31~45 小时**。而且这是"完全不碰"
+的待机值，每按一次键屏幕全亮 30 秒，日常使用会高一些。
 
 两轮都收敛：10% 那轮分三段是 48.2 / 43.4 / 43.3 mA；熄屏那轮分四段是
 39.4 / 39.9 / 40.6 / 35.3 mA，后半段逐分钟速率的标准差只有均值的 9%。
@@ -74,9 +86,46 @@ tickless idle，并放宽 LVGL port 的 5 ms tick）。注意一个坑：**USB �
 变暗"应是 20–34 mA，且认为背光占大头——实测 45 mA，且背光只占 14%。**这类估算
 不能当决策依据，必须实测。**
 
-下一步因此很明确：去啃那 38.8 mA，也就是 **DFS + 自动 light sleep**
-（`CONFIG_PM_ENABLE` + tickless idle，并放宽 LVGL port 的 5 ms tick）。
-在亮度曲线上继续做文章的天花板只有 6 mA，不值得。
+### 开启 light sleep 踩到的三个坑
+
+这三条缺一不可，缺任何一条的表现都是"开了 PM 但不对劲"，而且症状各不相同：
+
+1. **背光 LEDC 的时钟源**（`components/bsp/src/bsp_display.c`）。默认 `LEDC_AUTO_CLK`
+   在 C3 上会选中 APB，而 LEDC 驱动一旦用 APB 且开了 PM，就持有
+   `ESP_PM_APB_FREQ_MAX` 锁——只要背光在跑，light sleep **根本进不去**，改了等于没改。
+   必须显式选 `LEDC_USE_RC_FAST_CLK`。
+2. **LEDC 通道的睡眠策略**。`ledc_channel_config_t.sleep_mode` 默认是
+   `LEDC_SLEEP_MODE_NO_ALIVE_NO_PD`，即"进 light sleep 就停止输出"。芯片每秒睡醒上百次，
+   于是**背光疯狂闪烁**。改成 `LEDC_SLEEP_MODE_KEEP_ALIVE`。
+3. **GPIO 睡眠隔离**。`CONFIG_PM_SLP_DISABLE_GPIO` 为省 200~300 µA 会在每次自动睡眠时
+   隔离**所有** GPIO，背光脚也被掐。用 `gpio_sleep_sel_dis(BSP_LCD_BL)` 单独排除。
+
+### 还有一个会把你锁在门外的坑
+
+**ESP32-C3 的 USB Serial/JTAG 不支持在 light sleep 下工作，唤醒后也不行**（ESP-IDF 的
+Kconfig 原话）。开了自动 light sleep 而没开
+`CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION`（默认关闭）的后果是：芯片第一次进睡眠，串口
+就永久失联——日志断在开机 284 ms，**连 esptool 都连不上，没法再烧录**。
+
+这个状态下唯一救回来的办法是 `esptool --before usb_reset`（USB 级复位，不依赖已死的
+CDC 通道），成功率约 2/3，多试几次即可：
+
+```bash
+python -m esptool --chip esp32c3 --port <PORT> --before usb_reset \
+    --after hard_reset write_flash --flash_mode dio --flash_size 8MB --flash_freq 80m \
+    0x0 build/bootloader/bootloader.bin \
+    0x8000 build/partition_table/partition-table.bin \
+    0x10000 build/FoloToy-AI-Passport.bin
+```
+
+打开那个开关之后：**插着 USB 时持锁不自动睡**（串口与烧录正常），拔线用电池时才睡。
+代价是所有功耗测量都必须拔线跑——放电记录器本来就是为此设计的。
+
+### 再往下还能做什么
+
+当前 13.5 mA 里，屏幕控制器与稳压器静态电流已占相当比例，继续压的空间有限。
+真要再进一步，方向是熄屏（省 6 mA，但牺牲"抬眼即看"）或更激进的
+deep sleep（本文档前面已说明为什么不做）。
 
 ### 实测（约 20 分钟）
 

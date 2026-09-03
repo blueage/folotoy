@@ -18,6 +18,7 @@
 #include "otp_wifi.h"
 
 #include "esp_log.h"
+#include "esp_pm.h"
 #include "lvgl.h"
 #include "nvs_flash.h"
 
@@ -47,6 +48,20 @@ void app_main(void)
     }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "NVS 初始化失败: %s；令牌无法保存", esp_err_to_name(err));
+    }
+
+    // DFS + 自动 light sleep。空闲时降到 40 MHz（XTAL）并在无事可做时进 light
+    // sleep；有中断/定时器到期会自动醒来，应用层无感。
+    // 注意：BLE 与 Wi-Fi 活动期间协议栈会自行持锁，不会被睡掉。
+    const esp_pm_config_t pm = {
+        .max_freq_mhz = 80,
+        .min_freq_mhz = 40,
+        .light_sleep_enable = true,
+    };
+    esp_err_t pm_err = esp_pm_configure(&pm);
+    if (pm_err != ESP_OK) {
+        ESP_LOGW(TAG, "电源管理配置失败: %s；功耗会偏高但功能不受影响",
+                 esp_err_to_name(pm_err));
     }
 
     otp_clock_init();

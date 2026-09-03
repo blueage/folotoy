@@ -47,6 +47,33 @@ CONFIG_FREERTOS_HZ=1000
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=80
 
+# --- 电源管理 ---
+# 自动 light sleep + DFS。实测底噪 38.8 mA 里的大头是 CPU 从来没机会进 idle
+# （见 docs/power.zh_CN.md）。
+#
+# 三个前提，缺一不可，缺了就是"开了但没效果"：
+#   1. 背光 LEDC 必须用 RC_FAST（见 components/bsp/src/bsp_display.c），
+#      否则 APB 时钟的 PM 锁会把 light sleep 一直挡在门外；
+#   2. LVGL port 的 tick 与按键轮询都得放宽，否则每秒 400 次唤醒没有空隙可睡；
+#   3. **USB 控制台连着时不会进 light sleep**（驱动持锁），所有省电验证必须拔线跑。
+CONFIG_PM_ENABLE=y
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
+
+# ★ 没有这一条，开了 PM 之后串口就废了。
+# ESP32-C3 的 USB Serial/JTAG **不支持在 light sleep 下工作，唤醒后也不行**
+# （见 ESP-IDF 的 Kconfig 说明）。默认 n，于是插着线时芯片一睡，日志直接断流——
+# 实测就是这样：开机 284ms 之后一个字节都收不到。
+# 打开后：插着 USB 时持锁不自动睡（串口/烧录正常），拔线用电池时才睡。
+# 这也意味着**所有功耗测量必须拔线跑**，而放电记录器本来就是为此设计的。
+CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y
+# 把睡眠进出的代码放进 IRAM，缩短每次进出的开销——唤醒频繁时这项很关键。
+CONFIG_PM_SLP_IRAM_OPT=y
+CONFIG_PM_RTOS_IDLE_OPT=y
+
+# 按键扫描 5ms → 20ms。5ms 等于每秒唤醒 200 次；20ms 对"单击/长按"这种交互
+# 完全够用（长按阈值 1500ms 不受影响）。
+CONFIG_BUTTON_PERIOD_TIME_MS=20
+
 # --- SNTP ---
 # 开机对时配了三个服务器（见 main/otp_wifi.c），默认上限是 1。
 CONFIG_LWIP_SNTP_MAX_SERVERS=3

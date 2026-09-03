@@ -1,6 +1,7 @@
 // components/bsp/src/bsp_display.c
 // 移植自 trae_card/components/platform/platform_esp32/src/disp_st7789.c
 #include "bsp_display.h"
+#include "driver/gpio.h"
 #include "bsp_pins.h"
 #include "driver/spi_master.h"
 #include "driver/ledc.h"
@@ -60,7 +61,13 @@ static void backlight_init(void) {
         .timer_num       = BSP_BL_LEDC_TIMER,
         .duty_resolution = BSP_BL_LEDC_RES,
         .freq_hz         = BSP_BL_LEDC_FREQ_HZ,
-        .clk_cfg         = LEDC_AUTO_CLK,
+        // ★ 必须显式用 RC_FAST，不能用 LEDC_AUTO_CLK。
+        // AUTO 在 C3 上会选中 APB，而 ESP-IDF 的 LEDC 驱动一旦用 APB 且开了
+        // CONFIG_PM_ENABLE，就会持有 ESP_PM_APB_FREQ_MAX 锁：只要背光 PWM 在跑，
+        // 自动 light sleep 就永远进不去，省电改动全部白做。
+        // RC_FAST 不属于被 light sleep 门控的 APB，配合下面的 KEEP_ALIVE 才能
+        // 在睡眠期间继续输出。代价是它未校准（±5%），PWM 频率会飘——背光无所谓。
+        .clk_cfg         = LEDC_USE_RC_FAST_CLK,
     };
     esp_err_t e = ledc_timer_config(&t);
     if (e != ESP_OK) { ESP_LOGE(TAG, "ledc_timer_config 失败: %s", esp_err_to_name(e)); return; }
@@ -72,9 +79,22 @@ static void backlight_init(void) {
         .timer_sel  = BSP_BL_LEDC_TIMER,
         .duty       = 0,
         .hpoint     = 0,
+        // ★ 默认值是 LEDC_SLEEP_MODE_NO_ALIVE_NO_PD —— 进 light sleep 就停止输出。
+        // 开了自动 light sleep 之后，那表现为**背光疯狂闪烁**（每次睡/醒切换一次）。
+        // KEEP_ALIVE 让 LEDC 在睡眠期间继续输出，驱动会顺带要求时钟源不掉电。
+        .sleep_mode = LEDC_SLEEP_MODE_KEEP_ALIVE,
     };
     e = ledc_channel_config(&ch);
     if (e != ESP_OK) { ESP_LOGE(TAG, "ledc_channel_config 失败: %s", esp_err_to_name(e)); return; }
+
+    // 还不够：CONFIG_PM_SLP_DISABLE_GPIO 会在每次自动睡眠时隔离**所有** GPIO
+    // （为省那 200~300 uA），背光脚也会被掐掉。把这一个脚排除在外。
+    // 只有开了 PM 时这个调用才有意义，没开时它也是安全的空操作。
+    e = gpio_sleep_sel_dis((gpio_num_t)BSP_LCD_BL);
+    if (e != ESP_OK) {
+        ESP_LOGW(TAG, "背光脚未能排除睡眠隔离: %s;开启 light sleep 后可能闪烁",
+                 esp_err_to_name(e));
+    }
 
     s_bl_ready = true;
     ESP_LOGI(TAG, "背光 LEDC 就绪 gpio=%d", BSP_LCD_BL);
