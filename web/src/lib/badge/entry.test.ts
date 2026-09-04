@@ -4,8 +4,15 @@
 import { describe, expect, it } from 'vitest';
 
 import type { ServiceEntry } from '../twofas/types';
-import { defaultBadgeLabel, effectiveBadgeLabel, isBadgeEnabled, toBadgeEntry } from './entry';
-import { BADGE_LABEL_MAX, sanitizeBadgeText } from './limits';
+import {
+  defaultBadgeAccount,
+  defaultBadgeLabel,
+  effectiveBadgeAccount,
+  effectiveBadgeLabel,
+  isBadgeEnabled,
+  toBadgeEntry,
+} from './entry';
+import { BADGE_ISSUER_MAX, BADGE_LABEL_MAX, sanitizeBadgeText } from './limits';
 
 function makeEntry(overrides: Partial<ServiceEntry> = {}): ServiceEntry {
   return {
@@ -103,6 +110,41 @@ describe('显示名', () => {
   it('超长名字按工卡宽度截断', () => {
     const long = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
     expect(effectiveBadgeLabel(makeEntry({ badgeLabel: long }))).toHaveLength(BADGE_LABEL_MAX);
+  });
+});
+
+describe('副标题', () => {
+  it('缺省就是账号本身', () => {
+    expect(defaultBadgeAccount(makeEntry())).toBe('me@example.com');
+    expect(defaultBadgeAccount(makeEntry({ account: null }))).toBe('');
+  });
+
+  it('用户填了就用用户的', () => {
+    expect(effectiveBadgeAccount(makeEntry({ badgeAccount: 'work' }))).toBe('work');
+    expect(toBadgeEntry(makeEntry({ badgeAccount: 'work' }))).toMatchObject({
+      entry: { issuer: 'work' },
+    });
+  });
+
+  it('空串是"不要副标题"，不是"回到账号"', () => {
+    // 这一条是副标题与显示名最大的区别：账号常是一长串邮箱，用户清空它就是
+    // 想让它消失；若按显示名那套规则把空串当成"自动推导"，它会立刻长回来。
+    expect(effectiveBadgeAccount(makeEntry({ badgeAccount: '' }))).toBe('');
+    expect(toBadgeEntry(makeEntry({ badgeAccount: '' }))).toMatchObject({
+      entry: { issuer: '' },
+    });
+  });
+
+  it('null 才是回到账号', () => {
+    expect(effectiveBadgeAccount(makeEntry({ badgeAccount: null }))).toBe('me@example.com');
+    expect(effectiveBadgeAccount(makeEntry())).toBe('me@example.com');
+  });
+
+  it('同样按工卡的字符集与宽度清洗', () => {
+    expect(effectiveBadgeAccount(makeEntry({ badgeAccount: '微信 work' }))).toBe('work');
+    expect(
+      effectiveBadgeAccount(makeEntry({ badgeAccount: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' })),
+    ).toHaveLength(BADGE_ISSUER_MAX);
   });
 });
 

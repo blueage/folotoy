@@ -8,7 +8,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { canGenerateTotp, generateTotp, periodProgress } from '../lib/totp';
 import type { ServiceEntry } from '../lib/twofas/types';
-import ServiceIcon, { iconAccent } from './ServiceIcon';
+import { iconAccent } from '../lib/icons/tile';
+import ServiceIcon from './ServiceIcon';
 
 /** 不受支持条目的徽章文案（D13）。 */
 export const UNSUPPORTED_BADGE = '不支持';

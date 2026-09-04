@@ -2,7 +2,8 @@ import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 
 import type { ServiceEntry } from '../lib/twofas/types';
-import ServiceIcon, { LOGO_PADDING_PX, TILE_PX } from './ServiceIcon';
+import { LOGO_PADDING_PX, TILE_PX } from '../lib/icons/tile';
+import ServiceIcon from './ServiceIcon';
 
 const RFC_SECRET = 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ';
 

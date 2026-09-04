@@ -19,7 +19,9 @@
 // 屏幕上显示的名字。LVGL 只内置 Montserrat 拉丁字体，因此这里只接受
 // 可打印 ASCII；中文名由网页端在推送前改写成 ASCII 显示名。
 #define OTP_LABEL_MAX 20
-#define OTP_ISSUER_MAX 20
+// 副标题比名字多一格：列表里它自己占一整行（156px），12 号字写满 21 格约
+// 147px 还放得下，而 20 格常常差最后一两个字符。
+#define OTP_ISSUER_MAX 21
 
 #define OTP_DIGITS_MIN 6
 #define OTP_DIGITS_MAX 8
@@ -35,12 +37,19 @@ typedef enum {
 
 typedef struct {
     char label[OTP_LABEL_MAX + 1];    // 列表主标题，必填
-    char issuer[OTP_ISSUER_MAX + 1];  // 副标题，可为空串
+    char issuer[OTP_ISSUER_MAX + 1];  // 副标题（网页端推来的是账号），可为空串
     uint8_t secret[OTP_SECRET_MAX];   // 已由网页端 Base32 解码后的原始字节
     uint8_t secret_len;
     uint8_t digits;
     uint8_t period;
     uint8_t algorithm;  // otp_alg_t
+    // 这条的品牌主色（RGB565）。网页那边整行铺的就是它的一层淡色，
+    // 工卡照做；图标丢了的时候也用它画一块纯色兜底。
+    uint16_t accent;
+    // 对应图标位图的 CRC32。图标存在另一个分区、不随保险库一起写，
+    // 因此显示前必须拿它核对：对不上就说明那张图属于另一批数据，宁可不画。
+    // 0 表示这条没有图标。
+    uint32_t icon_crc;
 } otp_entry_t;
 
 typedef struct {

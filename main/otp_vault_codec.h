@@ -8,9 +8,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define OTP_VAULT_BLOB_VERSION 1
+// v1 → v2：每条追加 accent:u16 与 icon_crc:u32（列表页的品牌色与图标）。
+// 版本不匹配整体判损坏：卡上那批 v1 数据缺这两个字段，读成 v2 只会读出乱码。
+#define OTP_VAULT_BLOB_VERSION 2
 
-// 30 条 × 单条最大 86 字节 + 6 字节头，留出整数余量。
+// 30 条 × 单条最大 93 字节 + 6 字节头，留出整数余量。
 #define OTP_VAULT_BLOB_MAX 3072
 
 // 序列化。成功返回 true 并写出实际长度；缓冲区不足或条目非法返回 false。

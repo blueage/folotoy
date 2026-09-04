@@ -17,9 +17,11 @@ run_host_tests() {
     test_dir="$(mktemp -d /tmp/folo2fa-host-tests.XXXXXX)"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
         tests/test_otp_core.c main/otp_core.c main/otp_wire.c main/otp_vault_codec.c \
+        main/otp_icon.c \
         -o "${test_dir}/test_otp_core"
     "${test_dir}/test_otp_core"
     python3 tests/test_verify_firmware.py
+    python3 tests/test_gen_sprite.py
     rm -rf "${test_dir}"
     echo "Host tests: PASS"
 }

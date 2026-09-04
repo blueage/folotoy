@@ -12,6 +12,7 @@
 #include "bsp_pins.h"
 #include "otp_batlog.h"
 #include "otp_clock.h"
+#include "otp_icons.h"
 #include "otp_power.h"
 #include "otp_ui.h"
 #include "otp_vault.h"
@@ -65,6 +66,10 @@ void app_main(void)
     }
 
     otp_clock_init();
+    // 图标分区挂不上不算致命：令牌照常显示，列表里退回纯色块。
+    if (otp_icons_init() != ESP_OK) {
+        ESP_LOGW(TAG, "图标分区不可用，列表将不显示品牌图标");
+    }
     if (otp_vault_init() != ESP_OK) {
         ESP_LOGE(TAG, "保险库互斥锁创建失败；无法安全地读写令牌");
         return;

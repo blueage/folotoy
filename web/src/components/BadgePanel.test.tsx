@@ -104,6 +104,31 @@ describe('BadgePanel', () => {
     expect(onUpdateEntry).toHaveBeenCalledWith(expect.objectContaining({ badgeLabel: null }));
   });
 
+  it('副标题在失焦时保存，同样去掉工卡显示不了的字符', () => {
+    const { onUpdateEntry } = renderPanel([makeEntry()]);
+    const input = screen.getByRole('textbox', { name: 'GitHub 在工卡上的副标题' });
+    fireEvent.change(input, { target: { value: '工作 work' } });
+    fireEvent.blur(input);
+    expect(onUpdateEntry).toHaveBeenCalledWith(expect.objectContaining({ badgeAccount: 'work' }));
+  });
+
+  it('清空副标题存的是空串——那一行就不显示副标题了', () => {
+    // 与显示名相反：清空**不能**变回账号，否则那串邮箱永远删不掉。
+    const { onUpdateEntry } = renderPanel([makeEntry()]);
+    const input = screen.getByRole('textbox', { name: 'GitHub 在工卡上的副标题' });
+    fireEvent.change(input, { target: { value: '' } });
+    fireEvent.blur(input);
+    expect(onUpdateEntry).toHaveBeenCalledWith(expect.objectContaining({ badgeAccount: '' }));
+  });
+
+  it('把副标题改回账号原文等于没改过（存 null，继续跟着账号走）', () => {
+    const { onUpdateEntry } = renderPanel([makeEntry({ badgeAccount: '' })]);
+    const input = screen.getByRole('textbox', { name: 'GitHub 在工卡上的副标题' });
+    fireEvent.change(input, { target: { value: 'me@example.com' } });
+    fireEvent.blur(input);
+    expect(onUpdateEntry).toHaveBeenCalledWith(expect.objectContaining({ badgeAccount: null }));
+  });
+
   it('工卡放不下的条目显示原因，并拦住整批推送', async () => {
     const { badge } = renderPanel([
       makeEntry({ id: 'a', name: '支付宝', issuer: '支付宝', account: null }),

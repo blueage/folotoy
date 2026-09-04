@@ -3,8 +3,10 @@
 // 每一次拒绝都要带上人能看懂的原因，界面直接把它显示在条目旁边。
 
 import { Base32Error, base32Decode } from '../base32';
+import { iconAccent } from '../icons/tile';
 import { canGenerateTotp } from '../totp';
 import type { ServiceEntry } from '../twofas/types';
+import { hexToRgb565 } from './icon';
 import {
   BADGE_ALGORITHM_CODE,
   BADGE_DIGITS_MAX,
@@ -36,6 +38,26 @@ export function effectiveBadgeLabel(entry: ServiceEntry): string {
     return sanitizeBadgeText(custom, BADGE_LABEL_MAX).text;
   }
   return defaultBadgeLabel(entry);
+}
+
+/** 该条目在工卡上默认的副标题：账号原样清洗一遍。没有账号就是空的。 */
+export function defaultBadgeAccount(entry: ServiceEntry): string {
+  return sanitizeBadgeText(entry.account ?? '', BADGE_ISSUER_MAX).text;
+}
+
+/**
+ * 当前生效的工卡副标题。
+ *
+ * 和显示名不同，**空串在这里是有效值**：它的意思是"这一行不要副标题"，
+ * 而不是"回到自动推导"。回到自动推导用的是 null——账号是一长串邮箱时，
+ * 用户多半就是想把它去掉，不能让空输入又把它变回来。
+ */
+export function effectiveBadgeAccount(entry: ServiceEntry): string {
+  const custom = entry.badgeAccount;
+  if (custom !== undefined && custom !== null) {
+    return sanitizeBadgeText(custom, BADGE_ISSUER_MAX).text;
+  }
+  return defaultBadgeAccount(entry);
 }
 
 /** 条目是否会被算进这次推送。未显式关掉的都算。 */
@@ -80,18 +102,23 @@ export function toBadgeEntry(entry: ServiceEntry): BadgeConversion {
   if (label.length === 0) {
     return { ok: false, reason: '这条在工卡上没有可显示的名字，请手动填一个 ASCII 名字' };
   }
-  const account = sanitizeBadgeText(entry.account ?? '', BADGE_ISSUER_MAX);
+  const account = effectiveBadgeAccount(entry);
 
   return {
     ok: true,
     labelWasRewritten: label !== (entry.issuer ?? entry.name),
     entry: {
       label,
-      issuer: account.text,
+      issuer: account,
       secret,
       digits: entry.digits,
       period: entry.period,
       algorithm: BADGE_ALGORITHM_CODE[entry.algorithm],
+      // 品牌色和页面上那行铺的是同一个（lib/icons/tile.ts 算的），工卡照着铺。
+      accent: hexToRgb565(iconAccent(entry)),
+      // 位图要光栅化，那是浏览器的事；这一层是纯函数，只留个位置。
+      // 真正的图标由 BadgePanel 在推送前调 rasterizeBadgeIcon() 填进来。
+      icon: null,
     },
   };
 }

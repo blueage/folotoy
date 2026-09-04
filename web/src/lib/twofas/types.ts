@@ -26,6 +26,14 @@ export interface ServiceEntry {
    * 与顺序不同，它跟着条目一起加密存放：名字本身也是"你在用哪些服务"的线索。
    */
   badgeLabel?: string | null;
+  /**
+   * 工卡上那一行的副标题（第二行小字）。缺省 / null 表示跟着 account 走。
+   *
+   * 与 badgeLabel 有一处关键不同：**空串是有效值**，意思是"这一行不要副标题"。
+   * 账号常常是一长串邮箱，在 20 格的小字里只剩一截省略号，不如干脆不显示——
+   * 工卡那边没有副标题时会把名字挪到行的正中间。
+   */
+  badgeAccount?: string | null;
   /** 是否包含在下一次推送里。缺省视为 true —— 老记录没有这个字段。 */
   badgeEnabled?: boolean;
 }

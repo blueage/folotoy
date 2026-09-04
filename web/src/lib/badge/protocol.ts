@@ -3,6 +3,7 @@
 // 纯函数，不碰 DOM、Web Bluetooth 与存储层，因此可以整块单测。
 
 import {
+  BADGE_ICON_BLOB_MAX,
   BADGE_ISSUER_MAX,
   BADGE_LABEL_MAX,
   BADGE_PROTOCOL_VERSION,
@@ -20,6 +21,7 @@ export const HostFrame = {
   TIME: 0x05,
   WIPE: 0x06,
   WIFI: 0x07,
+  ICON: 0x08,
 } as const;
 
 /** 工卡 → 网页。 */
@@ -78,6 +80,15 @@ export interface BadgeEntry {
   digits: number;
   period: number;
   algorithm: number;
+  /** 品牌主色，RGB565。工卡拿它铺整行的淡底色，也用作图标丢失时的兜底色块。 */
+  accent: number;
+  /**
+   * 这一条的图标位图（lib/badge/icon.ts 编的），null 表示不带图标。
+   *
+   * 位图跟着 ENTRY 一起推，但**不进保险库**：它存在工卡的另一个分区里，
+   * 靠 ENTRY 里的 CRC 认亲。因此这里给什么，ENTRY 里的 icon_crc 就得是什么。
+   */
+  icon: Uint8Array | null;
 }
 
 const ASCII = new TextEncoder();
@@ -165,7 +176,14 @@ export function encodeEntryPayload(index: number, entry: BadgeEntry): Uint8Array
     throw new RangeError('名字超过工卡的长度上限');
   }
 
-  const payload = new Uint8Array(6 + entry.secret.length + 1 + label.length + 1 + issuer.length);
+  if (entry.icon !== null && entry.icon.length > BADGE_ICON_BLOB_MAX) {
+    throw new RangeError(`图标 ${String(entry.icon.length)} 字节，超过工卡的上限`);
+  }
+
+  // 末尾多出的 6 字节是 accent:u16 + icon_crc:u32（协议 v3）。
+  const payload = new Uint8Array(
+    6 + entry.secret.length + 1 + label.length + 1 + issuer.length + 6,
+  );
   let w = 0;
   payload[w++] = index & 0xff;
   payload[w++] = (index >> 8) & 0xff;
@@ -180,7 +198,38 @@ export function encodeEntryPayload(index: number, entry: BadgeEntry): Uint8Array
   w += label.length;
   payload[w++] = issuer.length;
   payload.set(issuer, w);
+  w += issuer.length;
+  payload[w++] = entry.accent & 0xff;
+  payload[w++] = (entry.accent >> 8) & 0xff;
+  const iconCrc = entry.icon === null ? 0 : crc32(0, entry.icon);
+  payload[w++] = iconCrc & 0xff;
+  payload[w++] = (iconCrc >>> 8) & 0xff;
+  payload[w++] = (iconCrc >>> 16) & 0xff;
+  payload[w++] = (iconCrc >>> 24) & 0xff;
   return payload;
+}
+
+/**
+ * 一张图标拆成的 ICON payload（不含帧头）。
+ *
+ * 每片带 index / offset / total 三个字段：工卡按 offset 严格续写，跳号就整批拒收。
+ * 每片的数据量取 122 —— 帧 payload 上限 128 减去这 6 个字节的片头。
+ */
+export const ICON_CHUNK_BYTES = 122;
+
+export function encodeIconPayloads(index: number, icon: Uint8Array): Uint8Array[] {
+  const payloads: Uint8Array[] = [];
+  for (let offset = 0; offset < icon.length; offset += ICON_CHUNK_BYTES) {
+    const slice = icon.subarray(offset, offset + ICON_CHUNK_BYTES);
+    const payload = new Uint8Array(6 + slice.length);
+    const view = new DataView(payload.buffer);
+    view.setUint16(0, index, true);
+    view.setUint16(2, offset, true);
+    view.setUint16(4, icon.length, true);
+    payload.set(slice, 6);
+    payloads.push(payload);
+  }
+  return payloads;
 }
 
 /** CRC-32/IEEE，与固件 otp_crc32() 同一实现（反射多项式 0xEDB88320）。 */
@@ -196,28 +245,50 @@ export function crc32(seed: number, data: Uint8Array): number {
   return ~crc >>> 0;
 }
 
-/** 一次完整推送的三段帧。数组顺序即工卡上的显示顺序。 */
+/** 一次完整推送的三段帧。 */
 export interface PushFrames {
   begin: Uint8Array;
-  entries: Uint8Array[];
+  /**
+   * ENTRY 与 ICON 交织成的帧流，顺序即工卡上的显示顺序。
+   *
+   * 不叫 entries 是因为它不再是"一条一帧"：一条带图标的条目会占十来帧，
+   * 按它的长度报进度，用户看到的才是真实的传输进度。
+   */
+  stream: Uint8Array[];
   commit: Uint8Array;
 }
 
-/** 拼出一次完整推送：BEGIN → ENTRY × n → COMMIT（CRC 覆盖全部 ENTRY payload）。 */
+/**
+ * 拼出一次完整推送：BEGIN → (ENTRY + 它的 ICON 分片) × n → COMMIT。
+ *
+ * 两点讲究：
+ *   - 图标紧跟在自己那条 ENTRY 后面，而不是等所有条目发完再统一发。工卡因此
+ *     一次只需要装配一张图（1.3 KB 的缓冲），不必为 30 张预留空间；
+ *   - CRC 覆盖 ENTRY 与 ICON **两种** payload，按发出的顺序累计。图标丢一片
+ *     也要在 COMMIT 时暴露出来——半张图会安静地画错，比整批拒收难查得多。
+ */
 export function buildPushFrames(
   entries: BadgeEntry[],
   unixSeconds: number,
   tzOffsetMin: number,
 ): PushFrames {
   let crc = 0;
-  const frames = entries.map((entry, index) => {
+  const frames: Uint8Array[] = [];
+  entries.forEach((entry, index) => {
     const payload = encodeEntryPayload(index, entry);
     crc = crc32(crc, payload);
-    return encodeFrame(HostFrame.ENTRY, payload);
+    frames.push(encodeFrame(HostFrame.ENTRY, payload));
+    if (entry.icon === null) {
+      return;
+    }
+    for (const chunk of encodeIconPayloads(index, entry.icon)) {
+      crc = crc32(crc, chunk);
+      frames.push(encodeFrame(HostFrame.ICON, chunk));
+    }
   });
   return {
     begin: encodeBegin(entries.length, unixSeconds, tzOffsetMin),
-    entries: frames,
+    stream: frames,
     commit: encodeCommit(crc),
   };
 }

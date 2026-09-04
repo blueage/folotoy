@@ -213,11 +213,13 @@ export async function pushEntries(
     }
 
     // 条目帧不逐条等确认：工卡只在出错时回帧，而 COMMIT 的 CRC 会兜住任何丢失。
+    // 进度按帧数报而不是按条数：带图标的一条要占十来帧，按条报会让进度条
+    // 一动不动地卡在同一个数字上好几秒。
     let sent = 0;
-    for (const frame of frames.entries) {
+    for (const frame of frames.stream) {
       await link.send(frame);
       sent += 1;
-      options.onProgress?.(sent, frames.entries.length);
+      options.onProgress?.(sent, frames.stream.length);
     }
 
     // 只认 COMMIT 之后那一帧 STATUS，别把握手时的旧状态当成结果。

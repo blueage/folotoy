@@ -12,6 +12,17 @@ static void write_u32(uint8_t *out, uint32_t value)
     }
 }
 
+static void write_u16(uint8_t *out, uint16_t value)
+{
+    out[0] = (uint8_t)(value & 0xFFU);
+    out[1] = (uint8_t)(value >> 8);
+}
+
+static uint16_t read_u16(const uint8_t *in)
+{
+    return (uint16_t)((uint16_t)in[0] | ((uint16_t)in[1] << 8));
+}
+
 static uint32_t read_u32(const uint8_t *in)
 {
     return (uint32_t)in[0] | ((uint32_t)in[1] << 8) | ((uint32_t)in[2] << 16) |
@@ -40,7 +51,7 @@ bool otp_vault_encode(const otp_vault_t *vault, uint8_t *out, size_t capacity, s
         }
         size_t label_len = strlen(entry->label);
         size_t issuer_len = strlen(entry->issuer);
-        size_t need = 4U + entry->secret_len + 1U + label_len + 1U + issuer_len;
+        size_t need = 4U + entry->secret_len + 1U + label_len + 1U + issuer_len + 6U;
         if (w + need > capacity) {
             return false;
         }
@@ -56,6 +67,10 @@ bool otp_vault_encode(const otp_vault_t *vault, uint8_t *out, size_t capacity, s
         out[w++] = (uint8_t)issuer_len;
         memcpy(&out[w], entry->issuer, issuer_len);
         w += issuer_len;
+        write_u16(&out[w], entry->accent);
+        w += 2U;
+        write_u32(&out[w], entry->icon_crc);
+        w += 4U;
     }
 
     *out_len = w;
@@ -106,12 +121,17 @@ bool otp_vault_decode(const uint8_t *data, size_t len, otp_vault_t *vault)
         cursor += label_len;
 
         uint8_t issuer_len = data[cursor++];
-        if (issuer_len > OTP_ISSUER_MAX || cursor + issuer_len > len) {
+        if (issuer_len > OTP_ISSUER_MAX || cursor + issuer_len + 6U > len) {
             return false;
         }
         memcpy(entry->issuer, &data[cursor], issuer_len);
         entry->issuer[issuer_len] = '\0';
         cursor += issuer_len;
+
+        entry->accent = read_u16(&data[cursor]);
+        cursor += 2U;
+        entry->icon_crc = read_u32(&data[cursor]);
+        cursor += 4U;
 
         if (!otp_entry_is_valid(entry)) {
             return false;

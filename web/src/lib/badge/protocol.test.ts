@@ -30,6 +30,8 @@ function entry(overrides: Partial<BadgeEntry> = {}): BadgeEntry {
     digits: 6,
     period: 30,
     algorithm: 0,
+    accent: 0,
+    icon: null,
     ...overrides,
   };
 }
@@ -73,15 +75,24 @@ describe('CRC32', () => {
 });
 
 describe('ENTRY payload', () => {
-  it('按 index/digits/period/alg/变长字段的次序排列', () => {
-    const payload = encodeEntryPayload(2, entry({ label: 'AB', issuer: 'C' }));
+  it('按 index/digits/period/alg/变长字段/accent/icon_crc 的次序排列', () => {
+    const payload = encodeEntryPayload(2, entry({ label: 'AB', issuer: 'C', accent: 0x1234 }));
     expect([...payload]).toEqual([
       2, 0, // index
       6, 30, 0, // digits / period / algorithm
       10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, // secret
       2, 0x41, 0x42, // label "AB"
       1, 0x43, // issuer "C"
+      0x34, 0x12, // accent（RGB565，小端）
+      0, 0, 0, 0, // icon_crc：没有图标就是 0
     ]);
+  });
+
+  it('带图标时尾巴上是这张图的 CRC32', () => {
+    const icon = Uint8Array.from([1, 2, 3, 4, 5]);
+    const payload = encodeEntryPayload(0, entry({ icon }));
+    const view = new DataView(payload.buffer, payload.byteOffset);
+    expect(view.getUint32(payload.length - 4, true)).toBe(crc32(0, icon));
   });
 
   it('超出工卡上限时抛错，而不是悄悄截断', () => {
@@ -95,9 +106,9 @@ describe('buildPushFrames', () => {
     const entries = [entry({ label: 'A' }), entry({ label: 'B' })];
     const frames = buildPushFrames(entries, 1700000000, 480);
 
-    expect(frames.entries).toHaveLength(2);
-    expect(frames.entries[0]?.[3]).toBe(0); // 第一条的 index 低字节
-    expect(frames.entries[1]?.[3]).toBe(1);
+    expect(frames.stream).toHaveLength(2);
+    expect(frames.stream[0]?.[3]).toBe(0); // 第一条的 index 低字节
+    expect(frames.stream[1]?.[3]).toBe(1);
 
     let expected = 0;
     entries.forEach((item, index) => {
@@ -112,7 +123,7 @@ describe('buildPushFrames', () => {
 
   it('空列表也有 BEGIN 与 COMMIT —— 这是"把卡清成 0 条"的合法用法', () => {
     const frames = buildPushFrames([], 1700000000, -300);
-    expect(frames.entries).toHaveLength(0);
+    expect(frames.stream).toHaveLength(0);
     expect(frames.begin[0]).toBe(HostFrame.BEGIN);
     expect(frames.commit[0]).toBe(HostFrame.COMMIT);
   });

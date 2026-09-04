@@ -1,6 +1,10 @@
 # Name,   Type, SubType, Offset,   Size,     Flags
+# icons 是二创加的：列表页的品牌图标位图（30 张，每张几百字节）。放不进 nvs
+# 的 0x6000，又不能挪动 cardid / recovery，于是落在 factory 之后的空档里。
+# 它是纯缓存——擦掉只是图标没了，重新同步一次就回来。
 nvs,      data, nvs,     0x9000,   0x6000,
 phy_init, data, phy,     0xf000,   0x1000,
 factory,  app,  factory, 0x10000,  0x300000,
+icons,    data, nvs,     0x310000, 0x20000,
 cardid,   data, nvs,     0x356000, 0x4000,
 recovery, app,  test,    0x700000, 0x100000,

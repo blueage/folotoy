@@ -1,6 +1,7 @@
 // tests/test_otp_core.c —— 主机侧纯逻辑测试：TOTP 截断与格式、CRC32、分页、
 // 以及 BLE 线格式的流式解析。不依赖 ESP-IDF，cc 直接编译即可运行。
 #include "otp_core.h"
+#include "otp_icon.h"
 #include "otp_vault_codec.h"
 #include "otp_wire.h"
 
@@ -183,9 +184,10 @@ static void put_frame(buffer_t *buf, uint8_t type, const uint8_t *payload, uint1
     buf->len += len;
 }
 
-static uint16_t build_entry_payload(uint8_t *out, uint16_t index, const char *label,
-                                    const char *issuer, const char *secret, uint8_t digits,
-                                    uint8_t period, uint8_t algorithm)
+static uint16_t build_entry_payload_ex(uint8_t *out, uint16_t index, const char *label,
+                                       const char *issuer, const char *secret, uint8_t digits,
+                                       uint8_t period, uint8_t algorithm, uint16_t accent,
+                                       uint32_t icon_crc)
 {
     uint16_t w = 0;
     out[w++] = (uint8_t)(index & 0xFFU);
@@ -205,7 +207,21 @@ static uint16_t build_entry_payload(uint8_t *out, uint16_t index, const char *la
     out[w++] = issuer_len;
     memcpy(&out[w], issuer, issuer_len);
     w = (uint16_t)(w + issuer_len);
+    // accent:u16 | icon_crc:u32
+    out[w++] = (uint8_t)(accent & 0xFFU);
+    out[w++] = (uint8_t)(accent >> 8);
+    for (int i = 0; i < 4; i++) {
+        out[w++] = (uint8_t)(icon_crc >> (8 * i));
+    }
     return w;
+}
+
+static uint16_t build_entry_payload(uint8_t *out, uint16_t index, const char *label,
+                                    const char *issuer, const char *secret, uint8_t digits,
+                                    uint8_t period, uint8_t algorithm)
+{
+    return build_entry_payload_ex(out, index, label, issuer, secret, digits, period, algorithm,
+                                  0x4321U, 0xDEADBEEFU);
 }
 
 // 一次完整同步的字节流：HELLO → BEGIN(2) → ENTRY×2 → COMMIT。
@@ -261,6 +277,9 @@ static int check_session_events(const recorder_t *rec, const otp_wire_t *wire)
     CHECK(memcmp(vault->entries[0].secret, "0123456789ABCDEF", 16) == 0);
     CHECK(vault->entries[0].digits == 6);
     CHECK(vault->entries[0].period == 30);
+    // 品牌色与图标校验和是 v3 新加的定长尾巴，解析必须原样带出来。
+    CHECK(vault->entries[0].accent == 0x4321U);
+    CHECK(vault->entries[0].icon_crc == 0xDEADBEEFU);
     CHECK(vault->entries[1].algorithm == OTP_ALG_SHA256);
     CHECK(vault->entries[1].digits == 8);
     CHECK(strcmp(vault->entries[1].label, "AWS root") == 0);
@@ -466,6 +485,10 @@ static otp_entry_t make_entry(const char *label, const char *issuer, uint8_t sec
     entry.digits = digits;
     entry.period = period;
     entry.algorithm = algorithm;
+    // 品牌色与图标校验和也要跟着走完整条编解码链：漏掉它们，屏幕上就是
+    // "颜色全变灰、图标全丢"，而所有测试仍然是绿的。
+    entry.accent = (uint16_t)(0x1234U + digits);
+    entry.icon_crc = 0xA5A50000U | digits;
     return entry;
 }
 
@@ -497,7 +520,8 @@ static int test_vault_codec_full_capacity_fits(void)
     otp_vault_t vault;
     memset(&vault, 0, sizeof(vault));
     for (int i = 0; i < OTP_MAX_ENTRIES; i++) {
-        vault.entries[i] = make_entry("12345678901234567890", "12345678901234567890",
+        // 名字 20 格、副标题 21 格，都写满：这才是真正的最坏情况。
+        vault.entries[i] = make_entry("12345678901234567890", "123456789012345678901",
                                       OTP_SECRET_MAX, 8, 30, OTP_ALG_SHA512);
     }
     vault.count = OTP_MAX_ENTRIES;
@@ -653,6 +677,367 @@ static int test_wire_wifi_credentials(void)
     return 0;
 }
 
+
+// ---------------------------------------------------------------------------
+// 图标位图
+// ---------------------------------------------------------------------------
+
+// 测试里的编码器：网页那边（web/src/lib/badge/icon.ts）写的是同一个格式，
+// 这里再实现一遍，好让"两端对格式的理解不一致"在主机上就暴露出来。
+typedef struct {
+    uint8_t bytes[OTP_ICON_BLOB_MAX];
+    size_t len;
+} icon_blob_t;
+
+// 调色板：{rgb565, alpha} × count。
+static void icon_begin(icon_blob_t *blob, const uint16_t *colors, const uint8_t *alphas,
+                       uint8_t count)
+{
+    blob->len = 0;
+    blob->bytes[blob->len++] = OTP_ICON_BLOB_VERSION;
+    blob->bytes[blob->len++] = OTP_ICON_W;
+    blob->bytes[blob->len++] = OTP_ICON_H;
+    blob->bytes[blob->len++] = count;
+    for (uint8_t i = 0; i < count; i++) {
+        blob->bytes[blob->len++] = (uint8_t)(colors[i] & 0xFFU);
+        blob->bytes[blob->len++] = (uint8_t)(colors[i] >> 8);
+        blob->bytes[blob->len++] = alphas[i];
+    }
+}
+
+static void icon_run(icon_blob_t *blob, uint8_t count, uint8_t index)
+{
+    blob->bytes[blob->len++] = count;
+    blob->bytes[blob->len++] = index;
+}
+
+// 字面量段：count 个下标，4bpp 打包，高半字节在前。
+static void icon_literal(icon_blob_t *blob, const uint8_t *indices, uint8_t count)
+{
+    blob->bytes[blob->len++] = 0x00;
+    blob->bytes[blob->len++] = count;
+    // 计数器用 int：count 最大 255，uint8_t 的 i += 2 会在 254 之后绕回 0 死循环。
+    for (int i = 0; i < (int)count; i += 2) {
+        uint8_t high = (uint8_t)(indices[i] << 4);
+        uint8_t low = (uint8_t)((i + 1 < (int)count) ? indices[i + 1] : 0);
+        blob->bytes[blob->len++] = (uint8_t)(high | low);
+    }
+}
+
+// 整幅铺同一个下标，用 255 一段一段地填满。
+static void icon_fill(icon_blob_t *blob, uint8_t index, size_t pixels)
+{
+    while (pixels > 0U) {
+        uint8_t take = pixels > 255U ? 255U : (uint8_t)pixels;
+        icon_run(blob, take, index);
+        pixels -= take;
+    }
+}
+
+static int test_icon_expand(void)
+{
+    const uint16_t colors[3] = { 0xF800U, 0x07E0U, 0x001FU };  // 红 绿 蓝
+    const uint8_t alphas[3] = { 255U, 255U, 0U };              // 第三格全透明
+
+    icon_blob_t blob;
+    icon_begin(&blob, colors, alphas, 3);
+    const uint8_t head[4] = { 0, 1, 2, 1 };
+    icon_literal(&blob, head, 4);
+    icon_fill(&blob, 0, OTP_ICON_PIXELS - 4U);
+
+    CHECK(otp_icon_blob_check(blob.bytes, blob.len));
+
+    static uint16_t px[OTP_ICON_PIXELS];
+    CHECK(otp_icon_expand(blob.bytes, blob.len, 0xFFFFU, px, OTP_ICON_PIXELS));
+    CHECK(px[0] == 0xF800U);
+    CHECK(px[1] == 0x07E0U);
+    // 全透明的那格必须变成底色本身，而不是调色板里记的那个颜色。
+    CHECK(px[2] == 0xFFFFU);
+    CHECK(px[3] == 0x07E0U);
+    CHECK(px[OTP_ICON_PIXELS - 1U] == 0xF800U);
+
+    // 换个底色，只有透明的那格跟着变。
+    CHECK(otp_icon_expand(blob.bytes, blob.len, 0x0000U, px, OTP_ICON_PIXELS));
+    CHECK(px[0] == 0xF800U);
+    CHECK(px[2] == 0x0000U);
+
+    // 半透明：黑底上的 50% 白应当落在中灰附近。
+    const uint16_t half_colors[1] = { 0xFFFFU };
+    const uint8_t half_alphas[1] = { 128U };
+    icon_begin(&blob, half_colors, half_alphas, 1);
+    icon_fill(&blob, 0, OTP_ICON_PIXELS);
+    CHECK(otp_icon_expand(blob.bytes, blob.len, 0x0000U, px, OTP_ICON_PIXELS));
+    uint8_t r5 = (uint8_t)((px[0] >> 11) & 0x1FU);
+    CHECK(r5 >= 14U && r5 <= 17U);
+    return 0;
+}
+
+static int test_icon_rejects_corruption(void)
+{
+    const uint16_t colors[2] = { 0xF800U, 0x07E0U };
+    const uint8_t alphas[2] = { 255U, 255U };
+    icon_blob_t blob;
+    icon_begin(&blob, colors, alphas, 2);
+    icon_fill(&blob, 1, OTP_ICON_PIXELS);
+    CHECK(otp_icon_blob_check(blob.bytes, blob.len));
+
+    icon_blob_t broken = blob;
+
+    // 版本号不认识。
+    broken.bytes[0] = OTP_ICON_BLOB_VERSION + 1U;
+    CHECK(!otp_icon_blob_check(broken.bytes, broken.len));
+
+    // 几何对不上：换过行高的固件必须整体拒收旧图，而不是把它拉伸开。
+    broken = blob;
+    broken.bytes[1] = OTP_ICON_W - 1U;
+    CHECK(!otp_icon_blob_check(broken.bytes, broken.len));
+
+    // 调色板越界。
+    broken = blob;
+    broken.bytes[3] = OTP_ICON_PALETTE_MAX + 1U;
+    CHECK(!otp_icon_blob_check(broken.bytes, broken.len));
+    broken.bytes[3] = 0;
+    CHECK(!otp_icon_blob_check(broken.bytes, broken.len));
+
+    // 像素少一个：铺不满就会在屏幕上留下一条没写过的脏内存。
+    broken = blob;
+    broken.bytes[broken.len - 2U] -= 1U;
+    CHECK(!otp_icon_blob_check(broken.bytes, broken.len));
+
+    // 像素多一个。
+    broken = blob;
+    broken.bytes[broken.len - 2U] += 1U;
+    CHECK(!otp_icon_blob_check(broken.bytes, broken.len));
+
+    // 下标指向调色板之外。
+    broken = blob;
+    broken.bytes[broken.len - 1U] = 5U;
+    CHECK(!otp_icon_blob_check(broken.bytes, broken.len));
+
+    // 截断在一个记号中间。
+    CHECK(!otp_icon_blob_check(blob.bytes, blob.len - 1U));
+
+    // 输出缓冲不够大时一个像素都不写。
+    static uint16_t px[OTP_ICON_PIXELS];
+    CHECK(!otp_icon_expand(blob.bytes, blob.len, 0, px, OTP_ICON_PIXELS - 1U));
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// ICON 帧
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    uint8_t bytes[8192];
+    size_t len;
+} big_buffer_t;
+
+static void big_put_frame(big_buffer_t *buf, uint8_t type, const uint8_t *payload, uint16_t len)
+{
+    buf->bytes[buf->len++] = type;
+    buf->bytes[buf->len++] = (uint8_t)(len & 0xFFU);
+    buf->bytes[buf->len++] = (uint8_t)(len >> 8);
+    memcpy(&buf->bytes[buf->len], payload, len);
+    buf->len += len;
+}
+
+// 一张图标拆成 ICON 帧。每帧最多带 chunk 字节数据，crc 按发出的顺序累计。
+static void put_icon_frames(big_buffer_t *buf, uint16_t index, const icon_blob_t *icon,
+                            uint16_t chunk, uint32_t *crc)
+{
+    for (uint16_t offset = 0; offset < icon->len; offset = (uint16_t)(offset + chunk)) {
+        uint16_t take = (uint16_t)(icon->len - offset);
+        if (take > chunk) {
+            take = chunk;
+        }
+        uint8_t payload[OTP_WIRE_PAYLOAD_MAX];
+        payload[0] = (uint8_t)(index & 0xFFU);
+        payload[1] = (uint8_t)(index >> 8);
+        payload[2] = (uint8_t)(offset & 0xFFU);
+        payload[3] = (uint8_t)(offset >> 8);
+        payload[4] = (uint8_t)(icon->len & 0xFFU);
+        payload[5] = (uint8_t)(icon->len >> 8);
+        memcpy(&payload[6], &icon->bytes[offset], take);
+        uint16_t len = (uint16_t)(take + 6U);
+        if (crc != NULL) {
+            *crc = otp_crc32(*crc, payload, len);
+        }
+        big_put_frame(buf, OTP_FRAME_ICON, payload, len);
+    }
+}
+
+static void make_test_icon(icon_blob_t *icon)
+{
+    const uint16_t colors[2] = { 0xFFFFU, 0x001FU };
+    const uint8_t alphas[2] = { 255U, 255U };
+    icon_begin(icon, colors, alphas, 2);
+    // 前 765 个像素黑白相间，于是位图有四百多字节、一定要拆进多帧才发得完——
+    // 分片重组正是这组测试要覆盖的东西。全铺一色的图只有 30 字节，一帧就发完了。
+    uint8_t indices[255];
+    for (int i = 0; i < 255; i++) {
+        indices[i] = (uint8_t)(i % 2);
+    }
+    for (int segment = 0; segment < 3; segment++) {
+        icon_literal(icon, indices, 255);
+    }
+    icon_fill(icon, 1, OTP_ICON_PIXELS - 765U);
+}
+
+// BEGIN → ENTRY(0) → ICON(0) 分片 → COMMIT。图标的每一片都要进 CRC，
+// 否则丢一片也能提交成功——那正是"图画错了却没人知道"的来源。
+static int test_wire_icon_stream(void)
+{
+    icon_blob_t icon;
+    make_test_icon(&icon);
+    uint32_t icon_crc = otp_crc32(0, icon.bytes, icon.len);
+
+    big_buffer_t buf = { .len = 0 };
+    uint8_t payload[OTP_WIRE_PAYLOAD_MAX];
+    uint32_t crc = 0;
+
+    uint8_t begin[12];
+    begin[0] = 1;
+    begin[1] = 0;
+    for (int i = 0; i < 8; i++) {
+        begin[2 + i] = (uint8_t)(1700000000ULL >> (8 * i));
+    }
+    begin[10] = (uint8_t)(480 & 0xFF);
+    begin[11] = (uint8_t)(480 >> 8);
+    big_put_frame(&buf, OTP_FRAME_BEGIN, begin, sizeof(begin));
+
+    uint16_t len = build_entry_payload_ex(payload, 0, "GitHub", "me@example.com", "0123456789",
+                                          6, 30, OTP_ALG_SHA1, 0x1234U, icon_crc);
+    crc = otp_crc32(crc, payload, len);
+    big_put_frame(&buf, OTP_FRAME_ENTRY, payload, len);
+    put_icon_frames(&buf, 0, &icon, 100, &crc);
+
+    uint8_t commit[4];
+    for (int i = 0; i < 4; i++) {
+        commit[i] = (uint8_t)(crc >> (8 * i));
+    }
+    big_put_frame(&buf, OTP_FRAME_COMMIT, commit, sizeof(commit));
+
+    otp_wire_t wire;
+    recorder_t rec = { .count = 0 };
+    otp_wire_reset(&wire);
+    // 逐字节喂：BLE 本来就不保证按帧到达，图标横跨几十帧更是如此。
+    for (size_t i = 0; i < buf.len; i++) {
+        otp_wire_feed(&wire, &buf.bytes[i], 1, record, &rec);
+    }
+
+    CHECK(rec.count == 4);
+    CHECK(rec.events[0].type == OTP_WIRE_EVENT_BEGIN);
+    CHECK(rec.events[1].type == OTP_WIRE_EVENT_PROGRESS);
+    CHECK(rec.events[2].type == OTP_WIRE_EVENT_ICON);
+    CHECK(rec.events[2].icon_index == 0);
+    CHECK(rec.events[3].type == OTP_WIRE_EVENT_COMMIT);
+
+    uint16_t got = 0;
+    const uint8_t *blob = otp_wire_icon(&wire, &got);
+    CHECK(got == icon.len);
+    CHECK(memcmp(blob, icon.bytes, icon.len) == 0);
+    CHECK(otp_wire_staging(&wire)->entries[0].icon_crc == icon_crc);
+    return 0;
+}
+
+static int test_wire_icon_rejects_bad_frames(void)
+{
+    icon_blob_t icon;
+    make_test_icon(&icon);
+    uint32_t icon_crc = otp_crc32(0, icon.bytes, icon.len);
+
+    uint8_t payload[OTP_WIRE_PAYLOAD_MAX];
+    uint8_t begin[12] = { 1, 0 };
+    for (int i = 0; i < 8; i++) {
+        begin[2 + i] = (uint8_t)(1700000000ULL >> (8 * i));
+    }
+
+    // 还没有 ENTRY 就来 ICON：图标只能跟在它自己那条后面。
+    {
+        big_buffer_t buf = { .len = 0 };
+        big_put_frame(&buf, OTP_FRAME_BEGIN, begin, sizeof(begin));
+        put_icon_frames(&buf, 0, &icon, 100, NULL);
+        otp_wire_t wire;
+        recorder_t rec = { .count = 0 };
+        otp_wire_reset(&wire);
+        otp_wire_feed(&wire, buf.bytes, buf.len, record, &rec);
+        CHECK(rec.count >= 2);
+        CHECK(rec.events[1].type == OTP_WIRE_EVENT_ERROR);
+        CHECK(rec.events[1].ack == OTP_ACK_ERR_SEQUENCE);
+    }
+
+    // 中间少了一片：续写的偏移对不上，必须整批丢掉。
+    {
+        big_buffer_t buf = { .len = 0 };
+        big_put_frame(&buf, OTP_FRAME_BEGIN, begin, sizeof(begin));
+        uint16_t len = build_entry_payload_ex(payload, 0, "GitHub", "", "0123456789", 6, 30,
+                                              OTP_ALG_SHA1, 0x1234U, icon_crc);
+        big_put_frame(&buf, OTP_FRAME_ENTRY, payload, len);
+
+        uint8_t chunk[OTP_WIRE_PAYLOAD_MAX];
+        chunk[0] = 0;
+        chunk[1] = 0;
+        chunk[2] = 0;  // offset = 0
+        chunk[3] = 0;
+        chunk[4] = (uint8_t)(icon.len & 0xFFU);
+        chunk[5] = (uint8_t)(icon.len >> 8);
+        memcpy(&chunk[6], icon.bytes, 100);
+        big_put_frame(&buf, OTP_FRAME_ICON, chunk, 106);
+        // 第二片跳过 100 字节，从 200 开始。
+        chunk[2] = (uint8_t)(200U & 0xFFU);
+        chunk[3] = 0;
+        memcpy(&chunk[6], &icon.bytes[200], 100);
+        big_put_frame(&buf, OTP_FRAME_ICON, chunk, 106);
+
+        otp_wire_t wire;
+        recorder_t rec = { .count = 0 };
+        otp_wire_reset(&wire);
+        otp_wire_feed(&wire, buf.bytes, buf.len, record, &rec);
+        CHECK(rec.count == 3);
+        CHECK(rec.events[2].type == OTP_WIRE_EVENT_ERROR);
+        CHECK(rec.events[2].ack == OTP_ACK_ERR_SEQUENCE);
+    }
+
+    // 位图内容和 ENTRY 声明的校验和对不上：两端对格式的理解不同，整批拒收。
+    {
+        big_buffer_t buf = { .len = 0 };
+        big_put_frame(&buf, OTP_FRAME_BEGIN, begin, sizeof(begin));
+        uint16_t len = build_entry_payload_ex(payload, 0, "GitHub", "", "0123456789", 6, 30,
+                                              OTP_ALG_SHA1, 0x1234U, icon_crc ^ 0xFFU);
+        big_put_frame(&buf, OTP_FRAME_ENTRY, payload, len);
+        put_icon_frames(&buf, 0, &icon, 100, NULL);
+
+        otp_wire_t wire;
+        recorder_t rec = { .count = 0 };
+        otp_wire_reset(&wire);
+        otp_wire_feed(&wire, buf.bytes, buf.len, record, &rec);
+        CHECK(rec.events[rec.count - 1U].type == OTP_WIRE_EVENT_ERROR);
+        CHECK(rec.events[rec.count - 1U].ack == OTP_ACK_ERR_CRC);
+    }
+
+    // 位图本身坏了（像素铺不满）：报字段错误，同样整批拒收。
+    {
+        icon_blob_t bad = icon;
+        bad.bytes[bad.len - 2U] -= 1U;
+        uint32_t bad_crc = otp_crc32(0, bad.bytes, bad.len);
+
+        big_buffer_t buf = { .len = 0 };
+        big_put_frame(&buf, OTP_FRAME_BEGIN, begin, sizeof(begin));
+        uint16_t len = build_entry_payload_ex(payload, 0, "GitHub", "", "0123456789", 6, 30,
+                                              OTP_ALG_SHA1, 0x1234U, bad_crc);
+        big_put_frame(&buf, OTP_FRAME_ENTRY, payload, len);
+        put_icon_frames(&buf, 0, &bad, 100, NULL);
+
+        otp_wire_t wire;
+        recorder_t rec = { .count = 0 };
+        otp_wire_reset(&wire);
+        otp_wire_feed(&wire, buf.bytes, buf.len, record, &rec);
+        CHECK(rec.events[rec.count - 1U].type == OTP_WIRE_EVENT_ERROR);
+        CHECK(rec.events[rec.count - 1U].ack == OTP_ACK_ERR_FIELD);
+    }
+    return 0;
+}
+
 int main(void)
 {
     struct {
@@ -674,6 +1059,10 @@ int main(void)
         { "vault_codec_roundtrip", test_vault_codec_roundtrip },
         { "vault_codec_full_capacity_fits", test_vault_codec_full_capacity_fits },
         { "vault_codec_rejects_corruption", test_vault_codec_rejects_corruption },
+        { "icon_expand", test_icon_expand },
+        { "icon_rejects_corruption", test_icon_rejects_corruption },
+        { "wire_icon_stream", test_wire_icon_stream },
+        { "wire_icon_rejects_bad_frames", test_wire_icon_rejects_bad_frames },
     };
 
     for (size_t i = 0; i < sizeof(tests) / sizeof(tests[0]); i++) {

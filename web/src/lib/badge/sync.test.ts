@@ -2,8 +2,9 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { FakeBadge } from './fakeBadge';
-import { BADGE_MAX_ENTRIES } from './limits';
+import { FakeBadge, decodeIconBlob } from './fakeBadge';
+import { buildIconBlob } from './icon';
+import { BADGE_ICON_H, BADGE_ICON_W, BADGE_MAX_ENTRIES } from './limits';
 import type { BadgeEntry } from './protocol';
 import {
   BadgeSyncError,
@@ -24,6 +25,8 @@ function entry(label: string, overrides: Partial<BadgeEntry> = {}): BadgeEntry {
     digits: 6,
     period: 30,
     algorithm: 0,
+    accent: 0,
+    icon: null,
     ...overrides,
   };
 }
@@ -146,6 +149,68 @@ describe('pushEntries', () => {
     await expect(
       pushEntries(badge, [entry('A')], { nowSec: () => NOW, timeoutMs: 20 }),
     ).rejects.toBeInstanceOf(BadgeSyncError);
+  });
+});
+
+describe('图标', () => {
+  /** 造一张 48×48 的测试图：左半白、右半品牌色，右下角透明。 */
+  function icon(): Uint8Array {
+    const pixels = BADGE_ICON_W * BADGE_ICON_H;
+    const data = new Uint8ClampedArray(pixels * 4);
+    for (let i = 0; i < pixels; i += 1) {
+      const x = i % BADGE_ICON_W;
+      const y = Math.floor(i / BADGE_ICON_W);
+      const transparent = x + y > BADGE_ICON_W + 12;
+      data[i * 4] = x < BADGE_ICON_W / 2 ? 255 : 0x16;
+      data[i * 4 + 1] = x < BADGE_ICON_W / 2 ? 255 : 0x77;
+      data[i * 4 + 2] = x < BADGE_ICON_W / 2 ? 255 : 0xff;
+      data[i * 4 + 3] = transparent ? 0 : 255;
+    }
+    return buildIconBlob({ data, width: BADGE_ICON_W, height: BADGE_ICON_H });
+  }
+
+  it('图标随条目一起送达，字节一个不差', async () => {
+    const badge = new FakeBadge();
+    const bytes = icon();
+    await pushEntries(badge, [entry('GitHub', { icon: bytes, accent: 0x1234 })], {
+      nowSec: () => NOW,
+    });
+
+    expect([...(badge.icons.get(0) ?? [])]).toEqual([...bytes]);
+    expect(badge.received[0]?.accent).toBe(0x1234);
+    // 设备侧照着协议文档解一遍：像素数正好铺满一屏图标。
+    expect(decodeIconBlob(badge.icons.get(0) as Uint8Array)).toHaveLength(
+      BADGE_ICON_W * BADGE_ICON_H,
+    );
+  });
+
+  it('一张图要拆成很多帧，进度也按帧走', async () => {
+    const badge = new FakeBadge();
+    const seen: number[] = [];
+    await pushEntries(badge, [entry('A', { icon: icon() })], {
+      nowSec: () => NOW,
+      onProgress: (sent) => seen.push(sent),
+    });
+    // 一条 ENTRY + 若干 ICON 分片：帧数远多于条数，否则说明图标压根没发出去。
+    expect(seen.length).toBeGreaterThan(2);
+  });
+
+  it('没有图标的条目照常推送，只是卡上少一块图', async () => {
+    const badge = new FakeBadge();
+    await pushEntries(badge, [entry('A'), entry('B', { icon: icon() })], { nowSec: () => NOW });
+    expect(badge.icons.has(0)).toBe(false);
+    expect(badge.icons.has(1)).toBe(true);
+  });
+
+  it('图标分片丢了同样过不了 COMMIT 的校验', async () => {
+    // CRC 必须覆盖 ICON payload：否则丢了图标的一批数据会"成功"写进去，
+    // 屏幕上表现为一张莫名其妙的图，比整批拒收难查得多。
+    const badge = new FakeBadge();
+    badge.dropIconIndex = 0;
+    await expect(
+      pushEntries(badge, [entry('A', { icon: icon() })], { nowSec: () => NOW }),
+    ).rejects.toThrow(/校验和/);
+    expect(badge.received).toHaveLength(0);
   });
 });
 

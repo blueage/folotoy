@@ -11,15 +11,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { type ConnectedBadge, connectBadge, isWebBluetoothAvailable } from '../lib/badge/ble';
-import { effectiveBadgeLabel, isBadgeEnabled, toBadgeEntry } from '../lib/badge/entry';
 import {
+  defaultBadgeAccount,
+  effectiveBadgeAccount,
+  effectiveBadgeLabel,
+  isBadgeEnabled,
+  toBadgeEntry,
+} from '../lib/badge/entry';
+import {
+  BADGE_ISSUER_MAX,
   BADGE_LABEL_MAX,
   BADGE_MAX_ENTRIES,
   BADGE_WIFI_PASS_MAX,
   BADGE_WIFI_SSID_MAX,
   sanitizeBadgeText,
 } from '../lib/badge/limits';
+import type { BadgeEntry } from '../lib/badge/protocol';
 import { WIFI_STATE_LABELS } from '../lib/badge/protocol';
+import { rasterizeBadgeIcon } from '../lib/badge/raster';
 import {
   type BadgeStatus,
   pushEntries,
@@ -77,6 +86,7 @@ export default function BadgePanel({
   const [progress, setProgress] = useState<{ sent: number; total: number } | null>(null);
   const [confirmingWipe, setConfirmingWipe] = useState(false);
   const [labelDrafts, setLabelDrafts] = useState<Record<string, string>>({});
+  const [accountDrafts, setAccountDrafts] = useState<Record<string, string>>({});
   const [wifiSsid, setWifiSsid] = useState('');
   const [wifiPassword, setWifiPassword] = useState('');
 
@@ -108,6 +118,7 @@ export default function BadgePanel({
         entry,
         enabled: isBadgeEnabled(entry),
         label: effectiveBadgeLabel(entry),
+        account: effectiveBadgeAccount(entry),
         conversion: toBadgeEntry(entry),
       })),
     [entries],
@@ -169,8 +180,26 @@ export default function BadgePanel({
       setError('有勾选的条目工卡放不下，请先取消勾选或修正它们。');
       return;
     }
-    const payload = chosen.flatMap((row) => (row.conversion.ok ? [row.conversion.entry] : []));
+    const pushable = chosen.flatMap((row) =>
+      row.conversion.ok ? [{ source: row.entry, badge: row.conversion.entry }] : [],
+    );
     void runOnLink('推送', async (badge) => {
+      // 图标在推之前逐条画好。画一张只要几毫秒，30 张也就零点几秒，
+      // 但它要用 canvas —— 所以只能在这里做，不能放进 toBadgeEntry 那种纯函数里。
+      setNotice('正在生成图标…');
+      let iconFailures = 0;
+      const payload: BadgeEntry[] = [];
+      for (const item of pushable) {
+        let icon: Uint8Array | null = null;
+        try {
+          icon = await rasterizeBadgeIcon(item.source);
+        } catch {
+          // 图标只是锦上添花：画不出来就不带它，令牌照常推。
+          iconFailures += 1;
+        }
+        payload.push({ ...item.badge, icon });
+      }
+
       const result = await pushEntries(badge.link, payload, {
         nowSec: effectiveNowSec,
         onProgress: (sent, total) => {
@@ -178,7 +207,9 @@ export default function BadgePanel({
         },
       });
       setStatus(result.status);
-      return `已推送 ${String(result.count)} 条到工卡，并顺带对好了时间。`;
+      const tail =
+        iconFailures > 0 ? `（有 ${String(iconFailures)} 条的图标没画出来，卡上会显示纯色块）` : '';
+      return `已推送 ${String(result.count)} 条到工卡，并顺带对好了时间。${tail}`;
     });
   }, [blocked.length, chosen, effectiveNowSec, runOnLink]);
 
@@ -225,6 +256,25 @@ export default function BadgePanel({
       const badgeLabel = cleaned.length > 0 ? cleaned : null;
       if (badgeLabel !== (entry.badgeLabel ?? null)) {
         onUpdateEntry({ ...entry, badgeLabel });
+      }
+    },
+    [onUpdateEntry],
+  );
+
+  const commitAccount = useCallback(
+    (entry: ServiceEntry, draft: string) => {
+      const cleaned = sanitizeBadgeText(draft, BADGE_ISSUER_MAX).text;
+      setAccountDrafts((current) => {
+        const next = { ...current };
+        delete next[entry.id];
+        return next;
+      });
+      // 副标题和名字在这里的规则不同：清空**不是**"回到自动推导"，而是
+      // "这一行不要副标题"（存空串）。只有当输入回到与账号完全一致时才存 null，
+      // 也就是"我没改过它"——否则用户永远删不掉那一长串邮箱。
+      const badgeAccount = cleaned === defaultBadgeAccount(entry) ? null : cleaned;
+      if (badgeAccount !== (entry.badgeAccount ?? null)) {
+        onUpdateEntry({ ...entry, badgeAccount });
       }
     },
     [onUpdateEntry],
@@ -338,7 +388,9 @@ export default function BadgePanel({
       {busy && (
         <p role="status" className="mt-3 text-sm text-slate-600 dark:text-slate-300">
           {phase === 'connecting' ? '正在连接工卡…' : '正在与工卡通信…'}
-          {progress !== null && ` ${String(progress.sent)}/${String(progress.total)}`}
+          {/* 进度按帧算：带图标的一条要占十来帧，按条报会卡在同一个数字上好几秒。 */}
+          {progress !== null &&
+            ` ${String(Math.round((progress.sent / Math.max(progress.total, 1)) * 100))}%`}
         </p>
       )}
 
@@ -456,7 +508,9 @@ export default function BadgePanel({
         </div>
         <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
           卡上的顺序就是这里的顺序；要改顺序请在上面的列表里拖拽图标。工卡只有拉丁字体，
-          中文名会被自动去掉，请给这类条目手填一个 ASCII 名字。
+          中文名会被自动去掉，请给这类条目手填一个 ASCII 名字。每行右边两格分别是工卡上的
+          <strong>名字</strong>与它下面那行<strong>副标题</strong>；副标题清空就是不显示，
+          此时名字会在那一行居中。
         </p>
 
         {entries.length === 0 ? (
@@ -495,6 +549,21 @@ export default function BadgePanel({
                     commitLabel(row.entry, event.target.value);
                   }}
                   className="w-40 rounded border border-slate-300 px-2 py-1 font-mono text-xs dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                />
+                <input
+                  type="text"
+                  value={accountDrafts[row.entry.id] ?? row.account}
+                  maxLength={BADGE_ISSUER_MAX}
+                  placeholder="副标题（可留空）"
+                  aria-label={`${row.entry.name} 在工卡上的副标题`}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setAccountDrafts((current) => ({ ...current, [row.entry.id]: value }));
+                  }}
+                  onBlur={(event) => {
+                    commitAccount(row.entry, event.target.value);
+                  }}
+                  className="w-40 rounded border border-slate-300 px-2 py-1 font-mono text-xs text-slate-600 placeholder:text-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
                 />
                 {!row.conversion.ok && (
                   <span className="w-full text-xs text-rose-600 dark:text-rose-400">

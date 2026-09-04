@@ -42,6 +42,10 @@ static void clear_staging(otp_wire_t *wire)
     wire->expected = 0;
     wire->received = 0;
     wire->crc = 0;
+    wire->icon_active = false;
+    wire->icon_filled = 0;
+    wire->icon_total = 0;
+    wire->icon_ready_len = 0;
 }
 
 void otp_wire_reset(otp_wire_t *wire)
@@ -52,6 +56,14 @@ void otp_wire_reset(otp_wire_t *wire)
 const otp_vault_t *otp_wire_staging(const otp_wire_t *wire)
 {
     return &wire->staging;
+}
+
+const uint8_t *otp_wire_icon(const otp_wire_t *wire, uint16_t *len)
+{
+    if (len != NULL) {
+        *len = wire->icon_ready_len;
+    }
+    return wire->icon_blob;
 }
 
 static void fail(otp_wire_t *wire, otp_wire_cb_t cb, void *context, uint8_t ack, bool drop_staging)
@@ -74,6 +86,7 @@ static void fail(otp_wire_t *wire, otp_wire_cb_t cb, void *context, uint8_t ack,
 //   secret_len:u8 | secret[secret_len]
 //   label_len:u8 | label[label_len]
 //   issuer_len:u8 | issuer[issuer_len]
+//   accent:u16 | icon_crc:u32
 // 变长字段逐段推进游标：任何一段越界都判 ERR_LENGTH，不做部分接受。
 static bool parse_entry(const uint8_t *payload, uint16_t len, uint16_t *index_out,
                         otp_entry_t *entry, uint8_t *ack)
@@ -125,6 +138,17 @@ static bool parse_entry(const uint8_t *payload, uint16_t len, uint16_t *index_ou
     memcpy(entry->issuer, &payload[cursor], issuer_len);
     entry->issuer[issuer_len] = '\0';
     cursor += issuer_len;
+
+    // 定长尾巴：品牌色与图标校验和。两者对显示是必需的，因此和其它字段一样
+    // 缺一不可，而不是"有就读、没有就算了"——那种宽容会让协议版本失去意义。
+    if (cursor + 6U > len) {
+        *ack = OTP_ACK_ERR_LENGTH;
+        return false;
+    }
+    entry->accent = read_u16(&payload[cursor]);
+    cursor += 2U;
+    entry->icon_crc = read_u32(&payload[cursor]);
+    cursor += 4U;
 
     // 多出来的尾巴意味着两端对字段的理解不同，宁可整帧拒收。
     if (cursor != len) {
@@ -273,6 +297,74 @@ static void handle_frame(otp_wire_t *wire, otp_wire_cb_t cb, void *context)
         otp_wire_event_t event = { .type = OTP_WIRE_EVENT_WIPE,
                                    .frame = wire->frame_type,
                                    .ack = OTP_ACK_OK };
+        emit(cb, context, &event);
+        return;
+    }
+    case OTP_FRAME_ICON: {
+        // index:u16 | offset:u16 | total:u16 | data[]
+        if (len < 6U) {
+            fail(wire, cb, context, OTP_ACK_ERR_LENGTH, true);
+            return;
+        }
+        uint16_t index = read_u16(payload);
+        uint16_t offset = read_u16(&payload[2]);
+        uint16_t total = read_u16(&payload[4]);
+        uint16_t chunk = (uint16_t)(len - 6U);
+
+        // 图标只能跟在它自己那条 ENTRY 后面：这样固件一次只需要装配一张图，
+        // 而不是留出 30 张的空间；顺带也挡住了"先发图再发条目"的乱序。
+        if (wire->expected == 0U || index >= wire->received) {
+            fail(wire, cb, context, OTP_ACK_ERR_SEQUENCE, true);
+            return;
+        }
+        if (total == 0U || total > OTP_ICON_BLOB_MAX) {
+            fail(wire, cb, context, OTP_ACK_ERR_FIELD, true);
+            return;
+        }
+        if (offset == 0U) {
+            wire->icon_active = true;
+            wire->icon_index = index;
+            wire->icon_total = total;
+            wire->icon_filled = 0;
+        } else if (!wire->icon_active || index != wire->icon_index ||
+                   total != wire->icon_total || offset != wire->icon_filled) {
+            // 续写的片段必须严格接在上一片后面：跳号意味着中间丢了字节，
+            // 拼下去只会得到一张沉默地画错的图。
+            fail(wire, cb, context, OTP_ACK_ERR_SEQUENCE, true);
+            return;
+        }
+        if ((uint32_t)offset + chunk > total) {
+            fail(wire, cb, context, OTP_ACK_ERR_LENGTH, true);
+            return;
+        }
+        memcpy(&wire->icon_blob[offset], &payload[6], chunk);
+        wire->icon_filled = (uint16_t)(offset + chunk);
+        wire->crc = otp_crc32(wire->crc, payload, len);
+
+        if (wire->icon_filled < wire->icon_total) {
+            return;  // 还没拼完，等下一片
+        }
+        wire->icon_active = false;
+        // 位图必须结构完整，且正是这条 ENTRY 声明的那张。
+        // 校验和对不上通常意味着两端对格式的理解不同——那种错在屏幕上
+        // 表现为一张莫名其妙的图，比整批拒收难查得多。
+        if (!otp_icon_blob_check(wire->icon_blob, wire->icon_total)) {
+            fail(wire, cb, context, OTP_ACK_ERR_FIELD, true);
+            return;
+        }
+        if (otp_crc32(0, wire->icon_blob, wire->icon_total) !=
+            wire->staging.entries[index].icon_crc) {
+            fail(wire, cb, context, OTP_ACK_ERR_CRC, true);
+            return;
+        }
+        wire->icon_ready_index = index;
+        wire->icon_ready_len = wire->icon_total;
+        otp_wire_event_t event = { .type = OTP_WIRE_EVENT_ICON,
+                                   .frame = wire->frame_type,
+                                   .ack = OTP_ACK_OK,
+                                   .received = wire->received,
+                                   .expected = wire->expected,
+                                   .icon_index = index };
         emit(cb, context, &event);
         return;
     }

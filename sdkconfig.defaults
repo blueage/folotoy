@@ -30,6 +30,9 @@ CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 # --- LVGL ---
 CONFIG_LV_COLOR_DEPTH_16=y
 CONFIG_LV_FONT_MONTSERRAT_14=y
+# 列表行的副标题（账号）。用 12 号而不是 14 号，是为了让 20 格上限的账号在
+# 156px 宽里能完整写下——14 号写满要 160px 出头，正好差一点。
+CONFIG_LV_FONT_MONTSERRAT_12=y
 CONFIG_LV_FONT_MONTSERRAT_20=y
 # 详情页的大字验证码。屏幕上只有一行大字，28 号是 240 px 宽度下
 # "八位分组码 + 空格"仍不换行的最大字号。

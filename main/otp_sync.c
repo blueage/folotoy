@@ -1,10 +1,13 @@
 #include "otp_sync.h"
 
 #include "otp_clock.h"
+#include "otp_icon.h"
+#include "otp_icons.h"
 #include "otp_vault.h"
 #include "otp_wifi.h"
 #include "otp_wire.h"
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "freertos/FreeRTOS.h"
@@ -41,6 +44,16 @@ static const ble_uuid128_t s_tx_uuid = BLE_UUID128_INIT(OTP_UUID_BYTES(0x03));
 #define OTP_FRAME_STATUS 0x81
 #define OTP_FRAME_ACK 0x82
 
+// 收下来的图标暂存区：30 张 × 1280 字节 ≈ 38 KB，只在同步页存在，
+// 进页时申请、出页时释放——常驻静态区太亏，而这段时间 Wi-Fi 是关着的。
+//
+// 图标和条目一样"整批生效"：中途失败就随暂存区一起丢掉，绝不会出现
+// 卡上贴着上一批图标的情况。
+typedef struct {
+    uint8_t blob[OTP_ICON_BLOB_MAX];
+    uint16_t len;
+} otp_icon_slot_t;
+
 // 待办：BLE host 任务只登记意图，真正的 NVS 写入交给 worker 任务，
 // 免得 flash 擦写把协议栈的时序拖崩。
 typedef struct {
@@ -65,6 +78,14 @@ static TaskHandle_t s_worker;
 static otp_sync_pending_t s_pending;
 static otp_sync_pending_t s_apply;
 static otp_wire_t s_wire;
+// 图标暂存区。BLE host 任务收帧时往里写，worker 任务在 COMMIT 之后读。
+//
+// 这里**刻意不上锁**：COMMIT 是一次会话的最后一帧，网页要等到 ACK 才会开下一批，
+// 因此两个任务实际上不会同时碰它。而给它上 s_pending 那把锁反而更糟——写图标要
+// 几百毫秒的 flash 擦写，持着锁做会把 BLE host 任务整个堵住。
+// 万一真有客户端抢跑，代价也只是那张图的 CRC 对不上、那一行退回纯色块。
+static otp_icon_slot_t *s_icons;
+static bool s_icons_pending;  // 这一批里收到过图标（COMMIT 时才需要写 flash）
 
 static uint16_t s_tx_handle;
 static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
@@ -253,6 +274,14 @@ static void on_wire_event(const otp_wire_event_t *event, void *context)
         send_status();
         break;
     case OTP_WIRE_EVENT_BEGIN:
+        // 新的一批：上一批没用上的图标必须先丢掉，否则这批里没带图标的条目
+        // 会捡到上一批同下标那张。
+        if (s_icons != NULL) {
+            for (size_t i = 0; i < OTP_MAX_ENTRIES; i++) {
+                s_icons[i].len = 0;
+            }
+        }
+        s_icons_pending = false;
         status_lock();
         s_status.state = OTP_SYNC_RECEIVING;
         s_status.expected = event->expected;
@@ -266,6 +295,23 @@ static void on_wire_event(const otp_wire_event_t *event, void *context)
         s_status.received = event->received;
         status_unlock();
         break;
+    case OTP_WIRE_EVENT_ICON: {
+        // 图标是"有更好、没有也能用"的东西：暂存区申请不到内存时照常收下
+        // 这一批令牌，只是列表里退回纯色块。
+        if (s_icons == NULL || event->icon_index >= OTP_MAX_ENTRIES) {
+            break;
+        }
+        uint16_t len = 0;
+        const uint8_t *blob = otp_wire_icon(&s_wire, &len);
+        if (len == 0U || len > OTP_ICON_BLOB_MAX) {
+            break;
+        }
+        otp_icon_slot_t *slot = &s_icons[event->icon_index];
+        memcpy(slot->blob, blob, len);
+        slot->len = len;
+        s_icons_pending = true;
+        break;
+    }
     case OTP_WIRE_EVENT_COMMIT:
         // 拷一份到待办里再交给 worker：BLE host 任务不碰 flash。
         status_lock();
@@ -313,6 +359,34 @@ static void on_wire_event(const otp_wire_event_t *event, void *context)
     }
 }
 
+// 把暂存的图标写进 icons 分区。只在 worker 任务里调用：这里是 flash 擦写。
+//
+// 没有"整批回滚"的必要——每条的 icon_crc 记在保险库里，写坏或写漏的那张
+// 在显示前就会被核对出来，那一行退回纯色块而已。
+static void write_pending_icons(uint8_t count)
+{
+    size_t written = 0;
+    size_t failed = 0;
+    for (uint8_t i = 0; i < OTP_MAX_ENTRIES; i++) {
+        // 这一批没带图标的下标要把旧图删掉。留着也不会显示（icon_crc 对不上），
+        // 但会一直占着分区，几次同步下来就把它填满了。
+        if (i >= count || s_icons[i].len == 0U) {
+            (void)otp_icons_erase(i);
+            continue;
+        }
+        esp_err_t err = otp_icons_save(i, s_icons[i].blob, s_icons[i].len);
+        if (err == ESP_OK) {
+            written++;
+        } else {
+            failed++;
+            ESP_LOGW(TAG, "写图标 %u 失败: %s", (unsigned)i, esp_err_to_name(err));
+        }
+        s_icons[i].len = 0;
+    }
+    s_icons_pending = false;
+    ESP_LOGI(TAG, "图标写入: 成功 %u，失败 %u", (unsigned)written, (unsigned)failed);
+}
+
 static void worker_task(void *arg)
 {
     (void)arg;
@@ -355,6 +429,14 @@ static void worker_task(void *arg)
             uint8_t count = s_apply.vault.count;
             memset(&s_apply.vault, 0, sizeof(s_apply.vault));
 
+            // 图标写在保险库之后，且写失败不改变本次同步的结果：
+            // 一张贴不上的图标不值得让一批已经算得出验证码的令牌整体作废。
+            // 顺序上先库后图也更安全——万一在这中间掉电，卡上是"新令牌 + 旧图标"，
+            // 而每条的 icon_crc 对不上，那几行只是退回纯色块。
+            if (err == ESP_OK && s_icons_pending && s_icons != NULL) {
+                write_pending_icons(count);
+            }
+
             status_lock();
             if (err == ESP_OK) {
                 s_status.state = OTP_SYNC_APPLIED;
@@ -376,6 +458,10 @@ static void worker_task(void *arg)
 
         if (s_apply.wipe) {
             esp_err_t err = otp_vault_clear();
+            esp_err_t icons_err = otp_icons_clear();
+            if (icons_err != ESP_OK && icons_err != ESP_ERR_INVALID_STATE) {
+                ESP_LOGW(TAG, "清空图标失败: %s", esp_err_to_name(icons_err));
+            }
             status_lock();
             s_status.state = (err == ESP_OK) ? OTP_SYNC_WIPED : OTP_SYNC_REJECTED;
             s_status.applied_count = 0;
@@ -613,6 +699,16 @@ esp_err_t otp_sync_start(void)
     s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
     s_notify_ready = false;
 
+    // 图标暂存区在协议栈之前申请：38 KB 连续内存，等 NimBLE 把堆切碎了再要
+    // 就未必拿得到。拿不到也照常同步，只是这一批不带图标。
+    if (s_icons == NULL) {
+        s_icons = heap_caps_calloc(OTP_MAX_ENTRIES, sizeof(otp_icon_slot_t), MALLOC_CAP_8BIT);
+        if (s_icons == NULL) {
+            ESP_LOGW(TAG, "图标暂存区申请失败，本次同步不接收图标");
+        }
+    }
+    s_icons_pending = false;
+
     esp_err_t err = nimble_port_init();
     if (err != ESP_OK) {
         set_failed((int)err);
@@ -686,6 +782,15 @@ void otp_sync_stop(void)
             ESP_LOGE(TAG, "同步 worker 未在 500 ms 内退出");
         }
     }
+
+    // 图标暂存区在这里释放，而不是等到函数末尾：下面有"协议栈本来就没起来"
+    // 的提前返回，放在末尾会让一次失败的 start 把 38 KB 一直挂着。
+    // 只在 worker 确实退出后释放——它正卡在写 flash 时，这块内存还在它手里。
+    if (s_icons != NULL && s_worker == NULL) {
+        heap_caps_free(s_icons);
+        s_icons = NULL;
+    }
+    s_icons_pending = false;
 
     if (!s_initialized) {
         set_state(OTP_SYNC_OFF);

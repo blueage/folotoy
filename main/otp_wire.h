@@ -7,6 +7,7 @@
 // 所有多字节整数一律小端，与 web/src/lib/badge/protocol.ts 对应。
 #pragma once
 
+#include "otp_icon.h"
 #include "otp_types.h"
 
 #include <stdbool.h>
@@ -15,10 +16,15 @@
 
 // 协议版本。任何不向后兼容的字段改动都必须 +1，两端同时改。
 //   v1 → v2：BEGIN / TIME 末尾追加时区偏移；新增 WIFI 帧。
-#define OTP_WIRE_VERSION 2
+//   v2 → v3：ENTRY 末尾追加 accent 与 icon_crc；新增 ICON 帧；
+//            COMMIT 的 CRC 改为覆盖 ENTRY 与 ICON 两种 payload。
+//   v3 → v4：issuer（副标题）上限 20 → 21。帧的排布一个字节都没变，但旧固件
+//            会把 21 个字符的副标题判成 ERR_FIELD 并拒收整批；与其让用户在
+//            推送中途撞上一个含糊的错误码，不如在握手时就说清楚版本不一致。
+#define OTP_WIRE_VERSION 4
 
 // 单帧 payload 上限。最大的一帧是 ENTRY：
-// 2+1+1+1+1+40（密钥）+1+20（标签）+1+20（发行方）= 88 字节。
+// 2+1+1+1+1+40（密钥）+1+20（标签）+1+21（副标题）+2（accent）+4（icon_crc）= 95 字节。
 #define OTP_WIRE_PAYLOAD_MAX 128
 
 #define OTP_WIRE_HEADER_SIZE 3
@@ -35,6 +41,7 @@ typedef enum {
     OTP_FRAME_TIME = 0x05,    // unix_seconds:u64 | tz_offset_min:i16
     OTP_FRAME_WIPE = 0x06,    // 空
     OTP_FRAME_WIFI = 0x07,    // ssid_len:u8 | ssid[] | pass_len:u8 | pass[]
+    OTP_FRAME_ICON = 0x08,    // index:u16 | offset:u16 | total:u16 | data[]
 } otp_frame_type_t;
 
 // ACK 里的结果码。网页端按码给出中文提示，不依赖设备发文本。
@@ -59,6 +66,7 @@ typedef enum {
     OTP_WIRE_EVENT_TIME,
     OTP_WIRE_EVENT_WIPE,
     OTP_WIRE_EVENT_WIFI,
+    OTP_WIRE_EVENT_ICON,
     OTP_WIRE_EVENT_ERROR,
 } otp_wire_event_type_t;
 
@@ -70,6 +78,7 @@ typedef struct {
     uint16_t expected;
     uint64_t unix_seconds;  // 仅 BEGIN / TIME / COMMIT 有意义
     int16_t tz_minutes;     // 仅 BEGIN / TIME 有意义
+    uint16_t icon_index;    // 仅 ICON 有意义：这张图属于第几条
 } otp_wire_event_t;
 
 typedef void (*otp_wire_cb_t)(const otp_wire_event_t *event, void *context);
@@ -96,6 +105,16 @@ typedef struct {
     // 把 96 字节口令塞进去会让每个回调都拖着它走。
     char wifi_ssid[OTP_WIFI_SSID_LIMIT + 1];
     char wifi_password[OTP_WIFI_PASS_LIMIT + 1];
+
+    // 正在装配的图标。图标一张就有几百字节，装不进一帧，因此按 offset 续写；
+    // 一次只装一张：网页是"发完第 n 条的 ENTRY 紧跟它的 ICON"这样串行推的。
+    uint8_t icon_blob[OTP_ICON_BLOB_MAX];
+    uint16_t icon_index;
+    uint16_t icon_total;
+    uint16_t icon_filled;
+    bool icon_active;
+    uint16_t icon_ready_index;  // 刚装配完的那张（OTP_WIRE_EVENT_ICON 期间有效）
+    uint16_t icon_ready_len;
 } otp_wire_t;
 
 void otp_wire_reset(otp_wire_t *wire);
@@ -106,3 +125,6 @@ void otp_wire_feed(otp_wire_t *wire, const uint8_t *data, size_t len, otp_wire_c
 
 // COMMIT 事件回调期间（及之后未再喂入数据前）有效的暂存保险库。
 const otp_vault_t *otp_wire_staging(const otp_wire_t *wire);
+
+// OTP_WIRE_EVENT_ICON 回调期间有效的图标位图。返回字节数，写不出时返回 0。
+const uint8_t *otp_wire_icon(const otp_wire_t *wire, uint16_t *len);
